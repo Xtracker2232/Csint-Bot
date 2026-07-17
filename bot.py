@@ -7,7 +7,7 @@ from datetime import datetime
 from typing import Dict, List, Any
 import io
 import asyncpg
-import json
+import asyncio
 
 # ============================================
 # CONFIGURATION
@@ -27,6 +27,7 @@ ADMIN_ROLE_ID = 1527750818986590248
 class Database:
     def __init__(self):
         self.pool = None
+        self.connected = False
     
     async def init(self):
         try:
@@ -35,18 +36,24 @@ class Database:
                 print("❌ DATABASE_URL non définie !")
                 return False
             
+            print("🔄 Connexion à PostgreSQL...")
+            
             self.pool = await asyncpg.create_pool(
                 database_url,
                 min_size=1,
-                max_size=10
+                max_size=5,
+                timeout=30
             )
             
             async with self.pool.acquire() as conn:
+                await conn.execute("SELECT 1")
+                
                 await conn.execute("""
                     CREATE TABLE IF NOT EXISTS users (
                         user_id TEXT PRIMARY KEY,
                         credits INTEGER DEFAULT 10,
-                        total_searches INTEGER DEFAULT 0
+                        total_searches INTEGER DEFAULT 0,
+                        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                     )
                 """)
                 
@@ -65,67 +72,102 @@ class Database:
                         user_id TEXT PRIMARY KEY
                     )
                 """)
-                
+            
+            self.connected = True
             print("✅ Base de données PostgreSQL connectée")
             return True
             
         except Exception as e:
             print(f"❌ Erreur PostgreSQL: {e}")
+            self.connected = False
             return False
     
+    async def ensure_connected(self):
+        if not self.connected or self.pool is None:
+            return await self.init()
+        return True
+    
     async def get_user(self, user_id: str):
-        async with self.pool.acquire() as conn:
-            result = await conn.fetchrow(
-                "SELECT * FROM users WHERE user_id = $1", user_id
-            )
-            if not result:
-                await conn.execute(
-                    "INSERT INTO users (user_id, credits) VALUES ($1, 10)", user_id
+        if not await self.ensure_connected():
+            return {"credits": 0, "total_searches": 0, "created_at": None}
+        
+        try:
+            async with self.pool.acquire() as conn:
+                result = await conn.fetchrow(
+                    "SELECT * FROM users WHERE user_id = $1", user_id
                 )
-                return {"credits": 10, "total_searches": 0}
-            return dict(result)
+                if not result:
+                    await conn.execute(
+                        "INSERT INTO users (user_id, credits) VALUES ($1, 10)", user_id
+                    )
+                    return {"credits": 10, "total_searches": 0, "created_at": datetime.now()}
+                return dict(result)
+        except Exception as e:
+            print(f"❌ Erreur get_user: {e}")
+            return {"credits": 0, "total_searches": 0, "created_at": None}
     
     async def add_credits(self, user_id: str, amount: int):
-        async with self.pool.acquire() as conn:
-            await conn.execute(
-                "UPDATE users SET credits = credits + $1 WHERE user_id = $2",
-                amount, user_id
-            )
+        if not await self.ensure_connected():
+            return
+        try:
+            async with self.pool.acquire() as conn:
+                await conn.execute(
+                    "UPDATE users SET credits = credits + $1 WHERE user_id = $2",
+                    amount, user_id
+                )
+        except Exception as e:
+            print(f"❌ Erreur add_credits: {e}")
     
     async def remove_credits(self, user_id: str, amount: int):
-        async with self.pool.acquire() as conn:
-            await conn.execute(
-                "UPDATE users SET credits = GREATEST(credits - $1, 0) WHERE user_id = $2",
-                amount, user_id
-            )
+        if not await self.ensure_connected():
+            return
+        try:
+            async with self.pool.acquire() as conn:
+                await conn.execute(
+                    "UPDATE users SET credits = GREATEST(credits - $1, 0) WHERE user_id = $2",
+                    amount, user_id
+                )
+        except Exception as e:
+            print(f"❌ Erreur remove_credits: {e}")
     
     async def add_search_history(self, user_id: str, query: str, results: int):
-        async with self.pool.acquire() as conn:
-            await conn.execute(
-                "INSERT INTO history (user_id, query, results) VALUES ($1, $2, $3)",
-                user_id, query, results
-            )
-            await conn.execute(
-                "UPDATE users SET total_searches = total_searches + 1 WHERE user_id = $1",
-                user_id
-            )
-            await conn.execute("""
-                DELETE FROM history 
-                WHERE id IN (
-                    SELECT id FROM history 
-                    WHERE user_id = $1 
-                    ORDER BY date DESC 
-                    OFFSET 10
+        if not await self.ensure_connected():
+            return
+        try:
+            async with self.pool.acquire() as conn:
+                await conn.execute(
+                    "INSERT INTO history (user_id, query, results) VALUES ($1, $2, $3)",
+                    user_id, query, results
                 )
-            """, user_id)
+                await conn.execute(
+                    "UPDATE users SET total_searches = total_searches + 1 WHERE user_id = $1",
+                    user_id
+                )
+                await conn.execute("""
+                    DELETE FROM history 
+                    WHERE id IN (
+                        SELECT id FROM history 
+                        WHERE user_id = $1 
+                        ORDER BY date DESC 
+                        OFFSET 10
+                    )
+                """, user_id)
+        except Exception as e:
+            print(f"❌ Erreur add_search_history: {e}")
     
     async def get_history(self, user_id: str, limit: int = 10):
-        async with self.pool.acquire() as conn:
-            results = await conn.fetch(
-                "SELECT query, results, date FROM history WHERE user_id = $1 ORDER BY date DESC LIMIT $2",
-                user_id, limit
-            )
-            return [dict(r) for r in results]
+        if not await self.ensure_connected():
+            return []
+        try:
+            async with self.pool.acquire() as conn:
+                results = await conn.fetch(
+                    "SELECT query, results, date FROM history WHERE user_id = $1 ORDER BY date DESC LIMIT $2",
+                    user_id, limit
+                )
+                return [dict(r) for r in results]
+        except Exception as e:
+            print(f"❌ Erreur get_history: {e}")
+            return []
     
     async def get_credits(self, user_id: str) -> int:
         user = await self.get_user(user_id)
@@ -136,24 +178,40 @@ class Database:
         return user.get("total_searches", 0)
     
     async def ban_user(self, user_id: str):
-        async with self.pool.acquire() as conn:
-            await conn.execute(
-                "INSERT INTO bans (user_id) VALUES ($1) ON CONFLICT DO NOTHING",
-                user_id
-            )
+        if not await self.ensure_connected():
+            return
+        try:
+            async with self.pool.acquire() as conn:
+                await conn.execute(
+                    "INSERT INTO bans (user_id) VALUES ($1) ON CONFLICT DO NOTHING",
+                    user_id
+                )
+        except Exception as e:
+            print(f"❌ Erreur ban_user: {e}")
     
     async def unban_user(self, user_id: str):
-        async with self.pool.acquire() as conn:
-            await conn.execute(
-                "DELETE FROM bans WHERE user_id = $1", user_id
-            )
+        if not await self.ensure_connected():
+            return
+        try:
+            async with self.pool.acquire() as conn:
+                await conn.execute(
+                    "DELETE FROM bans WHERE user_id = $1", user_id
+                )
+        except Exception as e:
+            print(f"❌ Erreur unban_user: {e}")
     
     async def is_banned(self, user_id: str) -> bool:
-        async with self.pool.acquire() as conn:
-            result = await conn.fetchrow(
-                "SELECT user_id FROM bans WHERE user_id = $1", user_id
-            )
-            return result is not None
+        if not await self.ensure_connected():
+            return False
+        try:
+            async with self.pool.acquire() as conn:
+                result = await conn.fetchrow(
+                    "SELECT user_id FROM bans WHERE user_id = $1", user_id
+                )
+                return result is not None
+        except Exception as e:
+            print(f"❌ Erreur is_banned: {e}")
+            return False
 
 db = Database()
 
@@ -243,6 +301,13 @@ class LookupAPI:
             return {"status": 500, "error": str(e)}
 
 # ============================================
+# FONCTIONS ADMIN
+# ============================================
+def is_admin(interaction: discord.Interaction) -> bool:
+    role = discord.utils.get(interaction.guild.roles, id=ADMIN_ROLE_ID)
+    return role and role in interaction.user.roles
+
+# ============================================
 # MODAL DE RECHERCHE
 # ============================================
 class SearchModal(Modal):
@@ -265,14 +330,19 @@ class SearchModal(Modal):
         self.add_item(self.ville)
     
     async def on_submit(self, interaction: discord.Interaction):
+        # Vérifier bannissement
         if await db.is_banned(str(interaction.user.id)):
             embed = discord.Embed(title="⛔ Accès refusé", description="Vous avez été banni.", color=discord.Color.red())
             await interaction.response.send_message(embed=embed, ephemeral=True)
             return
         
+        # Créer l'utilisateur s'il n'existe pas
+        await db.get_user(str(interaction.user.id))
+        
+        # Vérifier crédits
         credits = await db.get_credits(str(interaction.user.id))
         if credits <= 0:
-            embed = discord.Embed(title="❌ Crédits insuffisants", description="Contactez un administrateur.", color=discord.Color.red())
+            embed = discord.Embed(title="❌ Crédits insuffisants", description="Contactez un administrateur pour en obtenir.", color=discord.Color.red())
             await interaction.response.send_message(embed=embed, ephemeral=True)
             return
         
@@ -308,7 +378,7 @@ class SearchModal(Modal):
                     embed = view.create_embed()
                     await interaction.followup.send(embed=embed, view=view, ephemeral=True)
                 else:
-                    embed = discord.Embed(title="❌ Aucun résultat", description="Aucune personne trouvée.", color=discord.Color.orange())
+                    embed = discord.Embed(title="❌ Aucun résultat", description="Aucune personne trouvée avec ces critères.", color=discord.Color.orange())
                     await interaction.followup.send(embed=embed, ephemeral=True)
             else:
                 embed = discord.Embed(title="❌ Erreur API", description=f"Erreur: {result.get('status', 500)}", color=discord.Color.red())
@@ -337,6 +407,9 @@ class LookupModal(Modal):
             embed = discord.Embed(title="⛔ Accès refusé", description="Vous avez été banni.", color=discord.Color.red())
             await interaction.response.send_message(embed=embed, ephemeral=True)
             return
+        
+        # Créer l'utilisateur s'il n'existe pas
+        await db.get_user(str(interaction.user.id))
         
         credits = await db.get_credits(str(interaction.user.id))
         if credits <= 0:
@@ -375,7 +448,7 @@ class LookupModal(Modal):
                     embed.set_footer(text=f"Recherche: {value} • Created by Index")
                     await interaction.followup.send(embed=embed, ephemeral=True)
                 else:
-                    embed = discord.Embed(title="❌ Aucun résultat", description=f"Aucun enregistrement trouvé.", color=discord.Color.orange())
+                    embed = discord.Embed(title="❌ Aucun résultat", description="Aucun enregistrement trouvé.", color=discord.Color.orange())
                     await interaction.followup.send(embed=embed, ephemeral=True)
             else:
                 embed = discord.Embed(title="❌ Erreur API", description=f"Erreur: {result.get('status', 500)}", color=discord.Color.red())
@@ -412,14 +485,34 @@ class PaginationView(View):
             person = self.results[self.page]
             fields = []
             
-            for key, value in person.items():
-                if key.startswith("_"): continue
-                if value:
-                    key_fr = {"prenom": "Prénom", "nom_famille": "Nom", "email": "Email", "telephone": "Téléphone", "ville": "Ville"}.get(key, key)
-                    fields.append(f"**{key_fr}**: {value}")
+            if person.get("prenom"):
+                fields.append(f"👤 **Prénom**: {person['prenom']}")
+            if person.get("nom_famille"):
+                fields.append(f"📛 **Nom**: {person['nom_famille']}")
+            if person.get("email"):
+                fields.append(f"📧 **Email**: {person['email']}")
+            if person.get("telephone"):
+                fields.append(f"📱 **Téléphone**: {person['telephone']}")
+            if person.get("ville"):
+                fields.append(f"🏙️ **Ville**: {person['ville']}")
+            if person.get("date_naissance"):
+                fields.append(f"🎂 **Naissance**: {person['date_naissance']}")
+            if person.get("adresse"):
+                fields.append(f"📍 **Adresse**: {person['adresse']}")
+            if person.get("code_postal"):
+                fields.append(f"📮 **Code postal**: {person['code_postal']}")
+            if person.get("_confidence"):
+                fields.append(f"🔒 **Confiance**: {person['_confidence']}%")
+            if person.get("_sources"):
+                sources = ", ".join(person["_sources"][:5])
+                if len(person["_sources"]) > 5:
+                    sources += f" et {len(person['_sources'])-5} autre(s)"
+                fields.append(f"📚 **Sources**: {sources}")
             
-            embed.description = "\n".join(fields) if fields else "Aucune information"
+            embed.description = "\n".join(fields) if fields else "Aucune information détaillée"
             embed.add_field(name="👤 Personne", value=f"**#{self.page + 1}/{len(self.results)}**", inline=False)
+        else:
+            embed.description = "Aucun résultat"
         
         embed.set_footer(text=f"Page {self.page + 1}/{self.total_pages} • Created by Index")
         return embed
@@ -488,13 +581,18 @@ class PanelView(View):
         await interaction.response.defer(thinking=True, ephemeral=True)
         
         try:
+            # Créer l'utilisateur s'il n'existe pas
+            await db.get_user(str(interaction.user.id))
+            
             user_data = await db.get_user(str(interaction.user.id))
             history = await db.get_history(str(interaction.user.id), 5)
             
             embed = discord.Embed(title="📊 Mon compte", color=discord.Color.purple(), timestamp=datetime.now())
             embed.add_field(name="💰 Crédits", value=f"**{user_data.get('credits', 0)}**", inline=True)
             embed.add_field(name="🔍 Recherches", value=f"**{user_data.get('total_searches', 0)}**", inline=True)
+            embed.add_field(name="🚫 Banni", value="✅ Oui" if await db.is_banned(str(interaction.user.id)) else "❌ Non", inline=True)
             
+            # API BrixHub
             me = await LookupAPI.get_me()
             if me.get("status") == 200:
                 data = me.get("data", {})
@@ -508,6 +606,8 @@ class PanelView(View):
                     date = entry["date"].strftime("%d/%m %H:%M") if isinstance(entry["date"], datetime) else entry["date"][:16]
                     history_text += f"`{i}. {entry['query']}` → {entry['results']} résultats\n"
                 embed.add_field(name="📜 Dernières recherches", value=history_text, inline=False)
+            else:
+                embed.add_field(name="📜 Dernières recherches", value="Aucune recherche effectuée", inline=False)
             
             embed.set_footer(text="Created by Index")
             await interaction.followup.send(embed=embed, ephemeral=True)
@@ -517,14 +617,7 @@ class PanelView(View):
             await interaction.followup.send(embed=embed, ephemeral=True)
 
 # ============================================
-# FONCTIONS ADMIN
-# ============================================
-def is_admin(interaction: discord.Interaction) -> bool:
-    role = discord.utils.get(interaction.guild.roles, id=ADMIN_ROLE_ID)
-    return role and role in interaction.user.roles
-
-# ============================================
-# CRÉATION DU BOT (ICI !)
+# CRÉATION DU BOT
 # ============================================
 class Bot(discord.Client):
     def __init__(self):
@@ -537,13 +630,16 @@ class Bot(discord.Client):
         await self.tree.sync()
         print("✅ Commandes synchronisées")
 
-bot = Bot()  # <-- BOT CRÉÉ ICI
+bot = Bot()
 
 # ============================================
-# COMMANDES (APRÈS LA CRÉATION DE bot)
+# COMMANDES
 # ============================================
 @bot.tree.command(name="panel", description="📊 Ouvrir le panel de recherche")
 async def panel(interaction: discord.Interaction):
+    # Créer l'utilisateur dès le /panel
+    await db.get_user(str(interaction.user.id))
+    
     embed = discord.Embed(
         title="🔍 **Csint Lookup**",
         description="🔎 **Recherche dans plus de 33 milliards de données indexées en quelques millisecondes**",
@@ -563,7 +659,15 @@ async def add_credits(interaction: discord.Interaction, utilisateur: discord.Mem
         await interaction.response.send_message(embed=embed, ephemeral=True)
         return
     
+    if montant <= 0:
+        embed = discord.Embed(title="❌ Erreur", description="Le montant doit être supérieur à 0.", color=discord.Color.red())
+        await interaction.response.send_message(embed=embed, ephemeral=True)
+        return
+    
+    # Créer l'utilisateur s'il n'existe pas
+    await db.get_user(str(utilisateur.id))
     await db.add_credits(str(utilisateur.id), montant)
+    
     embed = discord.Embed(title="✅ Crédits ajoutés", description=f"{montant} crédit(s) ajouté(s) à {utilisateur.mention}", color=discord.Color.green())
     await interaction.response.send_message(embed=embed, ephemeral=True)
 
@@ -574,7 +678,15 @@ async def remove_credits(interaction: discord.Interaction, utilisateur: discord.
         await interaction.response.send_message(embed=embed, ephemeral=True)
         return
     
+    if montant <= 0:
+        embed = discord.Embed(title="❌ Erreur", description="Le montant doit être supérieur à 0.", color=discord.Color.red())
+        await interaction.response.send_message(embed=embed, ephemeral=True)
+        return
+    
+    # Créer l'utilisateur s'il n'existe pas
+    await db.get_user(str(utilisateur.id))
     await db.remove_credits(str(utilisateur.id), montant)
+    
     embed = discord.Embed(title="✅ Crédits retirés", description=f"{montant} crédit(s) retiré(s) à {utilisateur.mention}", color=discord.Color.orange())
     await interaction.response.send_message(embed=embed, ephemeral=True)
 
@@ -584,6 +696,9 @@ async def look(interaction: discord.Interaction, utilisateur: discord.Member):
         embed = discord.Embed(title="⛔ Accès refusé", description="Vous ne pouvez voir que vos propres stats.", color=discord.Color.red())
         await interaction.response.send_message(embed=embed, ephemeral=True)
         return
+    
+    # Créer l'utilisateur s'il n'existe pas
+    await db.get_user(str(utilisateur.id))
     
     user_data = await db.get_user(str(utilisateur.id))
     history = await db.get_history(str(utilisateur.id), 10)
@@ -599,6 +714,8 @@ async def look(interaction: discord.Interaction, utilisateur: discord.Member):
             date = entry["date"].strftime("%d/%m %H:%M") if isinstance(entry["date"], datetime) else entry["date"][:16]
             history_text += f"`{i}. {entry['query']}` → {entry['results']} résultats ({date})\n"
         embed.add_field(name="📜 10 dernières recherches", value=history_text, inline=False)
+    else:
+        embed.add_field(name="📜 10 dernières recherches", value="Aucune recherche effectuée", inline=False)
     
     embed.set_footer(text="Created by Index")
     await interaction.response.send_message(embed=embed, ephemeral=True)
@@ -607,6 +724,11 @@ async def look(interaction: discord.Interaction, utilisateur: discord.Member):
 async def ban_user(interaction: discord.Interaction, utilisateur: discord.Member):
     if not is_admin(interaction):
         embed = discord.Embed(title="⛔ Accès refusé", description="Admin seulement.", color=discord.Color.red())
+        await interaction.response.send_message(embed=embed, ephemeral=True)
+        return
+    
+    if utilisateur.id == interaction.user.id:
+        embed = discord.Embed(title="❌ Erreur", description="Vous ne pouvez pas vous bannir vous-même.", color=discord.Color.red())
         await interaction.response.send_message(embed=embed, ephemeral=True)
         return
     
@@ -634,9 +756,12 @@ async def on_ready():
     print(f"✅ Invité dans {len(bot.guilds)} serveurs")
     print(f"✅ Admin Role ID: {ADMIN_ROLE_ID}")
     
+    # Initialiser la base de données
     success = await db.init()
     if not success:
-        print("❌ Échec de connexion à la base de données")
+        print("❌ Échec de connexion à PostgreSQL - vérifie DATABASE_URL")
+    else:
+        print("✅ Base de données prête")
     
     print("✅ Created by Index")
 
