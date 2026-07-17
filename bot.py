@@ -1,3 +1,4 @@
+import os
 import discord
 from discord import app_commands
 from discord.ui import Button, View, Modal, TextInput
@@ -5,10 +6,9 @@ import aiohttp
 from datetime import datetime
 from typing import Dict, List, Any
 import asyncio
-import io
 
 # ============================================
-# CONFIGURATION - À MODIFIER AVEC VOS INFOS
+# CONFIGURATION
 # ============================================
 API_KEY = os.getenv("BRIXHUB_API_KEY")
 BOT_TOKEN = os.getenv("DISCORD_TOKEN")
@@ -26,7 +26,6 @@ class LookupAPI:
     
     @staticmethod
     async def search(data: Dict[str, Any]) -> Dict[str, Any]:
-        """Effectue une recherche multi-critères"""
         try:
             async with aiohttp.ClientSession() as session:
                 async with session.post(
@@ -44,7 +43,6 @@ class LookupAPI:
     
     @staticmethod
     async def lookup_email(email: str) -> Dict[str, Any]:
-        """Recherche par email"""
         try:
             async with aiohttp.ClientSession() as session:
                 async with session.get(
@@ -61,7 +59,6 @@ class LookupAPI:
     
     @staticmethod
     async def lookup_phone(phone: str) -> Dict[str, Any]:
-        """Recherche par téléphone"""
         try:
             async with aiohttp.ClientSession() as session:
                 async with session.get(
@@ -78,7 +75,6 @@ class LookupAPI:
     
     @staticmethod
     async def lookup_iban(iban: str) -> Dict[str, Any]:
-        """Recherche par IBAN"""
         try:
             async with aiohttp.ClientSession() as session:
                 async with session.get(
@@ -95,7 +91,6 @@ class LookupAPI:
     
     @staticmethod
     async def get_me() -> Dict[str, Any]:
-        """Informations du compte"""
         try:
             async with aiohttp.ClientSession() as session:
                 async with session.get(
@@ -111,11 +106,9 @@ class LookupAPI:
             return {"status": 500, "error": str(e)}
 
 # ============================================
-# MODALS
+# MODAL DE RECHERCHE
 # ============================================
 class SearchModal(Modal):
-    """Modal de recherche simple"""
-    
     def __init__(self):
         super().__init__(title="🔍 Recherche")
         
@@ -160,12 +153,9 @@ class SearchModal(Modal):
         self.add_item(self.ville)
     
     async def on_submit(self, interaction: discord.Interaction):
-        """Soumission de la recherche"""
         await interaction.response.defer(thinking=True, ephemeral=True)
         
-        # Construction de la requête
         query = {}
-        
         if self.prenom.value:
             query["prenom"] = self.prenom.value
         if self.nom.value:
@@ -177,7 +167,6 @@ class SearchModal(Modal):
         if self.ville.value:
             query["ville"] = self.ville.value
         
-        # Vérifier qu'au moins un champ est rempli
         if not query:
             embed = discord.Embed(
                 title="❌ Erreur",
@@ -187,12 +176,10 @@ class SearchModal(Modal):
             await interaction.followup.send(embed=embed, ephemeral=True)
             return
         
-        # Ajouter les options
         query["flexible"] = True
         query["per_page"] = 10
         
         try:
-            # Effectuer la recherche
             result = await LookupAPI.search(query)
             
             if result.get("status") == 200:
@@ -206,8 +193,7 @@ class SearchModal(Modal):
                 else:
                     embed = discord.Embed(
                         title="❌ Aucun résultat",
-                        description="Aucune personne trouvée avec ces critères.\n"
-                                    "💡 Astuce : Essayez avec moins de critères ou utilisez le lookup par email/téléphone.",
+                        description="Aucune personne trouvée avec ces critères.",
                         color=discord.Color.orange()
                     )
                     await interaction.followup.send(embed=embed, ephemeral=True)
@@ -228,9 +214,10 @@ class SearchModal(Modal):
             )
             await interaction.followup.send(embed=embed, ephemeral=True)
 
+# ============================================
+# LOOKUP MODAL
+# ============================================
 class LookupModal(Modal):
-    """Modal pour les lookups"""
-    
     def __init__(self, lookup_type: str):
         super().__init__(title=f"🔍 Lookup {lookup_type.capitalize()}")
         self.lookup_type = lookup_type
@@ -256,7 +243,6 @@ class LookupModal(Modal):
         self.add_item(self.value_input)
     
     async def on_submit(self, interaction: discord.Interaction):
-        """Soumission du lookup"""
         await interaction.response.defer(thinking=True, ephemeral=True)
         
         try:
@@ -352,20 +338,17 @@ class LookupModal(Modal):
 # PAGINATION VIEW
 # ============================================
 class PaginationView(View):
-    """Vue avec boutons de pagination et téléchargement"""
-    
     def __init__(self, results: List[Dict], page: int = 0, query: Dict = None, user_id: int = None):
         super().__init__(timeout=300)
         self.results = results
         self.page = page
         self.query = query or {}
         self.user_id = user_id
-        self.results_per_page = 1  # 1 résultat par page pour un affichage détaillé
+        self.results_per_page = 1
         self.total_pages = max(1, (len(results) + self.results_per_page - 1) // self.results_per_page)
         self.update_buttons()
     
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
-        """Vérifie que seul l'utilisateur qui a fait la recherche peut interagir"""
         if self.user_id and interaction.user.id != self.user_id:
             embed = discord.Embed(
                 title="⛔ Accès refusé",
@@ -377,7 +360,6 @@ class PaginationView(View):
         return True
     
     def create_embed(self):
-        """Crée l'embed pour la page actuelle"""
         start_idx = self.page * self.results_per_page
         end_idx = min(start_idx + self.results_per_page, len(self.results))
         
@@ -387,7 +369,6 @@ class PaginationView(View):
             timestamp=datetime.now()
         )
         
-        # Info sur la page
         embed.add_field(
             name="📊 Page",
             value=f"**{self.page + 1}/{self.total_pages}**",
@@ -399,92 +380,26 @@ class PaginationView(View):
             inline=True
         )
         
-        # Résultat de la page
         if start_idx < len(self.results):
             person = self.results[start_idx]
             fields = []
             
-            # Informations personnelles
             if person.get("prenom"):
                 fields.append(f"👤 **Prénom**: {person['prenom']}")
             if person.get("nom_famille"):
                 fields.append(f"📛 **Nom**: {person['nom_famille']}")
-            if person.get("nom_naissance"):
-                fields.append(f"📝 **Nom de naissance**: {person['nom_naissance']}")
-            if person.get("nom_affichage"):
-                fields.append(f"🖊️ **Nom d'affichage**: {person['nom_affichage']}")
-            if person.get("nom_utilisateur"):
-                fields.append(f"🔑 **Nom d'utilisateur**: {person['nom_utilisateur']}")
-            
-            # Contact
             if person.get("email"):
                 fields.append(f"📧 **Email**: {person['email']}")
             if person.get("telephone"):
                 fields.append(f"📱 **Téléphone**: {person['telephone']}")
-            if person.get("mobile"):
-                fields.append(f"📱 **Mobile**: {person['mobile']}")
-            
-            # Adresse
-            if person.get("adresse"):
-                fields.append(f"📍 **Adresse**: {person['adresse']}")
-            if person.get("complement_adresse"):
-                fields.append(f"🏢 **Complément**: {person['complement_adresse']}")
             if person.get("ville"):
                 fields.append(f"🏙️ **Ville**: {person['ville']}")
+            if person.get("date_naissance"):
+                fields.append(f"🎂 **Naissance**: {person['date_naissance']}")
+            if person.get("adresse"):
+                fields.append(f"📍 **Adresse**: {person['adresse']}")
             if person.get("code_postal"):
                 fields.append(f"📮 **Code postal**: {person['code_postal']}")
-            if person.get("pays"):
-                fields.append(f"🌍 **Pays**: {person['pays']}")
-            if person.get("region"):
-                fields.append(f"🗺️ **Région**: {person['region']}")
-            if person.get("departement"):
-                fields.append(f"📌 **Département**: {person['departement']}")
-            
-            # Naissance
-            if person.get("date_naissance"):
-                fields.append(f"🎂 **Date de naissance**: {person['date_naissance']}")
-            if person.get("annee_naissance"):
-                fields.append(f"📅 **Année de naissance**: {person['annee_naissance']}")
-            if person.get("ville_naissance"):
-                fields.append(f"🏠 **Ville de naissance**: {person['ville_naissance']}")
-            if person.get("lieu_naissance"):
-                fields.append(f"📍 **Lieu de naissance**: {person['lieu_naissance']}")
-            
-            # Identifiants
-            if person.get("discord_id"):
-                fields.append(f"🆔 **Discord ID**: {person['discord_id']}")
-            if person.get("steam_id"):
-                fields.append(f"🎮 **Steam ID**: {person['steam_id']}")
-            if person.get("fivem_license"):
-                fields.append(f"🎯 **FiveM License**: {person['fivem_license']}")
-            if person.get("fivem_license2"):
-                fields.append(f"🎯 **FiveM License 2**: {person['fivem_license2']}")
-            if person.get("xbox_live_id"):
-                fields.append(f"🎮 **Xbox Live ID**: {person['xbox_live_id']}")
-            if person.get("live_id"):
-                fields.append(f"🎮 **Live ID**: {person['live_id']}")
-            
-            # Bancaire
-            if person.get("iban"):
-                fields.append(f"🏦 **IBAN**: {person['iban']}")
-            if person.get("bic"):
-                fields.append(f"🏦 **BIC**: {person['bic']}")
-            
-            # Professionnel
-            if person.get("societe"):
-                fields.append(f"🏢 **Société**: {person['societe']}")
-            if person.get("profession"):
-                fields.append(f"💼 **Profession**: {person['profession']}")
-            if person.get("fonction"):
-                fields.append(f"📋 **Fonction**: {person['fonction']}")
-            
-            # Entreprise
-            if person.get("siret"):
-                fields.append(f"📋 **SIRET**: {person['siret']}")
-            if person.get("siren"):
-                fields.append(f"📋 **SIREN**: {person['siren']}")
-            
-            # Informations de confiance
             if person.get("_confidence"):
                 fields.append(f"🔒 **Confiance**: {person['_confidence']}%")
             if person.get("_sources"):
@@ -495,7 +410,6 @@ class PaginationView(View):
             
             embed.description = "\n".join(fields) if fields else "Aucune information détaillée"
             
-            # Numéro de la personne
             embed.add_field(
                 name="👤 Personne",
                 value=f"**#{start_idx + 1}** sur {len(self.results)}",
@@ -512,10 +426,8 @@ class PaginationView(View):
         return embed
     
     def update_buttons(self):
-        """Met à jour l'état des boutons"""
         self.clear_items()
         
-        # Bouton Gauche (Précédent)
         prev_button = Button(
             label="◀ Gauche",
             style=discord.ButtonStyle.primary,
@@ -524,7 +436,6 @@ class PaginationView(View):
         prev_button.callback = self.previous_page
         self.add_item(prev_button)
         
-        # Indicateur de page
         page_button = Button(
             label=f"📄 {self.page + 1}/{self.total_pages}",
             style=discord.ButtonStyle.grey,
@@ -532,7 +443,6 @@ class PaginationView(View):
         )
         self.add_item(page_button)
         
-        # Bouton Droite (Suivant)
         next_button = Button(
             label="Droite ▶",
             style=discord.ButtonStyle.primary,
@@ -541,16 +451,13 @@ class PaginationView(View):
         next_button.callback = self.next_page
         self.add_item(next_button)
         
-        # Bouton Télécharger
         download_button = Button(
             label="📥 Télécharger .txt",
-            style=discord.ButtonStyle.success,
-            custom_id="download"
+            style=discord.ButtonStyle.success
         )
         download_button.callback = self.download_page
         self.add_item(download_button)
         
-        # Bouton Fermer
         close_button = Button(
             label="❌ Fermer",
             style=discord.ButtonStyle.danger
@@ -559,25 +466,21 @@ class PaginationView(View):
         self.add_item(close_button)
     
     async def update_embed(self, interaction: discord.Interaction):
-        """Met à jour l'embed avec la nouvelle page"""
         embed = self.create_embed()
         self.update_buttons()
         await interaction.response.edit_message(embed=embed, view=self)
     
     async def previous_page(self, interaction: discord.Interaction):
-        """Page précédente"""
         if self.page > 0:
             self.page -= 1
             await self.update_embed(interaction)
     
     async def next_page(self, interaction: discord.Interaction):
-        """Page suivante"""
         if self.page < self.total_pages - 1:
             self.page += 1
             await self.update_embed(interaction)
     
     async def download_page(self, interaction: discord.Interaction):
-        """Télécharge la page actuelle en .txt"""
         await interaction.response.defer(ephemeral=True)
         
         start_idx = self.page * self.results_per_page
@@ -594,7 +497,6 @@ class PaginationView(View):
         
         person = self.results[start_idx]
         
-        # Créer le contenu du fichier
         content = "=" * 60 + "\n"
         content += f"🔍 RÉSULTAT DE RECHERCHE\n"
         content += f"📊 Page {self.page + 1}/{self.total_pages}\n"
@@ -602,7 +504,6 @@ class PaginationView(View):
         content += f"📅 {datetime.now().strftime('%d/%m/%Y %H:%M:%S')}\n"
         content += "=" * 60 + "\n\n"
         
-        # Ajouter toutes les informations
         for key, value in person.items():
             if key.startswith("_"):
                 continue
@@ -610,48 +511,16 @@ class PaginationView(View):
                 key_fr = {
                     "prenom": "Prénom",
                     "nom_famille": "Nom",
-                    "nom_naissance": "Nom de naissance",
-                    "nom_affichage": "Nom d'affichage",
-                    "nom_utilisateur": "Nom d'utilisateur",
                     "email": "Email",
                     "telephone": "Téléphone",
                     "mobile": "Mobile",
                     "adresse": "Adresse",
-                    "complement_adresse": "Complément d'adresse",
                     "ville": "Ville",
                     "code_postal": "Code postal",
-                    "pays": "Pays",
-                    "region": "Région",
-                    "departement": "Département",
-                    "date_naissance": "Date de naissance",
-                    "annee_naissance": "Année de naissance",
-                    "ville_naissance": "Ville de naissance",
-                    "lieu_naissance": "Lieu de naissance",
-                    "discord_id": "Discord ID",
-                    "steam_id": "Steam ID",
-                    "fivem_license": "FiveM License",
-                    "fivem_license2": "FiveM License 2",
-                    "xbox_live_id": "Xbox Live ID",
-                    "live_id": "Live ID",
-                    "iban": "IBAN",
-                    "bic": "BIC",
-                    "societe": "Société",
-                    "profession": "Profession",
-                    "fonction": "Fonction",
-                    "siret": "SIRET",
-                    "siren": "SIREN",
-                    "vin_plaque": "VIN/Plaque",
-                    "immatriculation": "Immatriculation",
-                    "numero_serie": "Numéro de série",
-                    "marque": "Marque",
-                    "modele": "Modèle",
-                    "genre": "Genre",
-                    "civilite": "Civilité",
-                    "adresse_ip": "Adresse IP"
+                    "date_naissance": "Date de naissance"
                 }.get(key, key)
                 content += f"{key_fr}: {value}\n"
         
-        # Ajouter les sources
         if person.get("_sources"):
             content += "\n" + "-" * 40 + "\n"
             content += "📚 Sources:\n"
@@ -664,7 +533,6 @@ class PaginationView(View):
         content += "\n" + "=" * 60 + "\n"
         content += "Created by Index"
         
-        # Créer le fichier
         file = discord.File(
             io.BytesIO(content.encode('utf-8')),
             filename=f"recherche_page_{self.page + 1}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.txt"
@@ -677,7 +545,6 @@ class PaginationView(View):
         )
     
     async def close_panel(self, interaction: discord.Interaction):
-        """Ferme le panel"""
         await interaction.response.edit_message(
             content="✅ Panel fermé",
             embed=None,
@@ -688,34 +555,27 @@ class PaginationView(View):
 # PANEL VIEW
 # ============================================
 class PanelView(View):
-    """Vue principale du panel"""
-    
     def __init__(self):
         super().__init__(timeout=None)
     
-    @discord.ui.button(label="🔍 Recherche", style=discord.ButtonStyle.primary, custom_id="search")
+    @discord.ui.button(label="🔍 Recherche", style=discord.ButtonStyle.primary)
     async def search_button(self, interaction: discord.Interaction, button: Button):
-        """Bouton de recherche"""
         await interaction.response.send_modal(SearchModal())
     
-    @discord.ui.button(label="📧 Lookup Email", style=discord.ButtonStyle.success, custom_id="lookup_email")
+    @discord.ui.button(label="📧 Lookup Email", style=discord.ButtonStyle.success)
     async def lookup_email_button(self, interaction: discord.Interaction, button: Button):
-        """Bouton lookup email"""
         await interaction.response.send_modal(LookupModal("email"))
     
-    @discord.ui.button(label="📱 Lookup Phone", style=discord.ButtonStyle.success, custom_id="lookup_phone")
+    @discord.ui.button(label="📱 Lookup Phone", style=discord.ButtonStyle.success)
     async def lookup_phone_button(self, interaction: discord.Interaction, button: Button):
-        """Bouton lookup phone"""
         await interaction.response.send_modal(LookupModal("phone"))
     
-    @discord.ui.button(label="🏦 Lookup IBAN", style=discord.ButtonStyle.success, custom_id="lookup_iban")
+    @discord.ui.button(label="🏦 Lookup IBAN", style=discord.ButtonStyle.success)
     async def lookup_iban_button(self, interaction: discord.Interaction, button: Button):
-        """Bouton lookup iban"""
         await interaction.response.send_modal(LookupModal("iban"))
     
-    @discord.ui.button(label="📊 Mon compte", style=discord.ButtonStyle.secondary, custom_id="account")
+    @discord.ui.button(label="📊 Mon compte", style=discord.ButtonStyle.secondary)
     async def account_button(self, interaction: discord.Interaction, button: Button):
-        """Bouton compte"""
         await interaction.response.defer(thinking=True, ephemeral=True)
         
         try:
@@ -729,31 +589,11 @@ class PanelView(View):
                     timestamp=datetime.now()
                 )
                 
-                embed.add_field(
-                    name="📋 Plan",
-                    value=data.get("plan", "Inconnu"),
-                    inline=True
-                )
-                embed.add_field(
-                    name="📊 Quota journalier",
-                    value=data.get("daily_quota", 0),
-                    inline=True
-                )
-                embed.add_field(
-                    name="📈 Utilisé aujourd'hui",
-                    value=data.get("daily_used", 0),
-                    inline=True
-                )
-                embed.add_field(
-                    name="✅ Restant",
-                    value=data.get("daily_remaining", 0),
-                    inline=True
-                )
-                embed.add_field(
-                    name="📊 Total requêtes",
-                    value=data.get("total_requests", 0),
-                    inline=True
-                )
+                embed.add_field(name="📋 Plan", value=data.get("plan", "Inconnu"), inline=True)
+                embed.add_field(name="📊 Quota journalier", value=data.get("daily_quota", 0), inline=True)
+                embed.add_field(name="📈 Utilisé aujourd'hui", value=data.get("daily_used", 0), inline=True)
+                embed.add_field(name="✅ Restant", value=data.get("daily_remaining", 0), inline=True)
+                embed.add_field(name="📊 Total requêtes", value=data.get("total_requests", 0), inline=True)
                 embed.add_field(
                     name="📄 Pagination",
                     value="✅ Activée" if data.get("pagination_enabled") else "❌ Désactivée",
@@ -782,8 +622,6 @@ class PanelView(View):
 # BOT
 # ============================================
 class Bot(discord.Client):
-    """Bot Discord"""
-    
     def __init__(self):
         intents = discord.Intents.default()
         intents.message_content = True
@@ -791,7 +629,6 @@ class Bot(discord.Client):
         self.tree = app_commands.CommandTree(self)
     
     async def setup_hook(self):
-        """Configuration du bot"""
         await self.tree.sync()
         print("✅ Commandes synchronisées")
 
@@ -799,7 +636,6 @@ bot = Bot()
 
 @bot.event
 async def on_ready():
-    """Événement quand le bot est prêt"""
     print(f"✅ Bot connecté en tant que {bot.user}")
     print(f"✅ Invité dans {len(bot.guilds)} serveurs")
     print(f"✅ Tapez /panel pour ouvrir le panel")
@@ -810,8 +646,6 @@ async def on_ready():
     description="📊 Ouvrir le panel de recherche"
 )
 async def panel(interaction: discord.Interaction):
-    """Commande pour ouvrir le panel"""
-    
     embed = discord.Embed(
         title="🔍 **Csint Lookup**",
         description="🔎 **Recherche dans plus de 33 milliards de données indexées en quelques millisecondes**",
@@ -819,20 +653,20 @@ async def panel(interaction: discord.Interaction):
         timestamp=datetime.now()
     )
     
-    embed.set_image(url="https://cdn.discordapp.com/attachments/1524748144238137354/1527393637401628685/5333CBCB-BB49-4786-8256-C8AC04CA29C3-1.png?ex=6a5a7fac&is=6a592e2c&hm=6c7dccc9c433c1e4abac8ad7b7e8d58460c1b09fabfe95078bbdbf386e0d9f54&")
-    
+    embed.set_image(url="https://cdn.discordapp.com/attachments/1477415267452719208/1508616783903461417/logo.PNG?ex=6a5a159e&is=6a58c41e&hm=9b8b1439fbb9e7e2b045ca054dd52c32b8544a6f985740a5e33f636d4ca08210")
     embed.set_footer(text="⚡ Ultra rapide • Fiable • Created by Index")
     
     view = PanelView()
     await interaction.response.send_message(embed=embed, view=view)
 
 # ============================================
-# LANCEMENT DU BOT
+# LANCEMENT
 # ============================================
 if __name__ == "__main__":
-    if BOT_TOKEN == "VOTRE_TOKEN_DISCORD":
-        print("❌ ERREUR: Veuillez configurer votre token Discord dans BOT_TOKEN")
-        print("❌ Ne partagez jamais votre token !")
+    if not BOT_TOKEN:
+        print("❌ ERREUR: DISCORD_TOKEN non défini !")
+    elif not API_KEY:
+        print("❌ ERREUR: BRIXHUB_API_KEY non défini !")
     else:
         try:
             bot.run(BOT_TOKEN)
