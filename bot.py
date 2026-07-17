@@ -19,7 +19,9 @@ HEADERS = {
     "X-API-Key": API_KEY,
     "Content-Type": "application/json"
 }
-ADMIN_ROLE_ID = 1527750818986590248  # Rôle "crediteurs"
+
+# Rôle par défaut (si aucun configuré)
+DEFAULT_ADMIN_ROLE_ID = None  # Aucun rôle par défaut
 
 # ============================================
 # BASE DE DONNÉES POSTGRESQL
@@ -42,12 +44,13 @@ class Database:
                 database_url,
                 min_size=1,
                 max_size=5,
-                timeout=30
+                timeout=60
             )
             
             async with self.pool.acquire() as conn:
                 await conn.execute("SELECT 1")
                 
+                # Table des utilisateurs
                 await conn.execute("""
                     CREATE TABLE IF NOT EXISTS users (
                         user_id TEXT PRIMARY KEY,
@@ -57,6 +60,7 @@ class Database:
                     )
                 """)
                 
+                # Table de l'historique
                 await conn.execute("""
                     CREATE TABLE IF NOT EXISTS history (
                         id SERIAL PRIMARY KEY,
@@ -67,10 +71,26 @@ class Database:
                     )
                 """)
                 
+                # Table des bannissements
                 await conn.execute("""
                     CREATE TABLE IF NOT EXISTS bans (
                         user_id TEXT PRIMARY KEY
                     )
+                """)
+                
+                # Table de configuration (pour stocker le rôle admin)
+                await conn.execute("""
+                    CREATE TABLE IF NOT EXISTS config (
+                        key TEXT PRIMARY KEY,
+                        value TEXT
+                    )
+                """)
+                
+                # Ajouter la config par défaut si elle n'existe pas
+                await conn.execute("""
+                    INSERT INTO config (key, value) 
+                    VALUES ('admin_role_id', '') 
+                    ON CONFLICT (key) DO NOTHING
                 """)
             
             self.connected = True
@@ -87,6 +107,7 @@ class Database:
             return await self.init()
         return True
     
+    # ========== GESTION UTILISATEURS ==========
     async def get_user(self, user_id: str):
         if not await self.ensure_connected():
             return {"credits": 0, "total_searches": 0, "created_at": None}
@@ -177,6 +198,7 @@ class Database:
         user = await self.get_user(user_id)
         return user.get("total_searches", 0)
     
+    # ========== GESTION BANS ==========
     async def ban_user(self, user_id: str):
         if not await self.ensure_connected():
             return
@@ -212,6 +234,36 @@ class Database:
         except Exception as e:
             print(f"❌ Erreur is_banned: {e}")
             return False
+    
+    # ========== GESTION CONFIG ==========
+    async def get_admin_role(self) -> int:
+        """Récupère l'ID du rôle admin depuis la base"""
+        if not await self.ensure_connected():
+            return None
+        try:
+            async with self.pool.acquire() as conn:
+                result = await conn.fetchrow(
+                    "SELECT value FROM config WHERE key = 'admin_role_id'"
+                )
+                if result and result["value"]:
+                    return int(result["value"])
+                return None
+        except Exception as e:
+            print(f"❌ Erreur get_admin_role: {e}")
+            return None
+    
+    async def set_admin_role(self, role_id: int):
+        """Définit l'ID du rôle admin dans la base"""
+        if not await self.ensure_connected():
+            return
+        try:
+            async with self.pool.acquire() as conn:
+                await conn.execute(
+                    "UPDATE config SET value = $1 WHERE key = 'admin_role_id'",
+                    str(role_id)
+                )
+        except Exception as e:
+            print(f"❌ Erreur set_admin_role: {e}")
 
 db = Database()
 
@@ -303,27 +355,35 @@ class LookupAPI:
 # ============================================
 # FONCTIONS ADMIN
 # ============================================
-def is_admin(interaction: discord.Interaction) -> bool:
-    """Vérifie si l'utilisateur a le rôle 'crediteurs' (1527750818986590248)"""
+async def get_admin_role_id() -> int:
+    """Récupère l'ID du rôle admin depuis la DB"""
+    return await db.get_admin_role()
+
+async def is_admin(interaction: discord.Interaction) -> bool:
+    """Vérifie si l'utilisateur a le rôle admin configuré"""
     if not interaction.guild:
         return False
     
-    role = discord.utils.get(interaction.guild.roles, id=ADMIN_ROLE_ID)
+    admin_role_id = await get_admin_role_id()
+    if not admin_role_id:
+        # Aucun rôle configuré → personne n'est admin
+        return False
     
+    role = discord.utils.get(interaction.guild.roles, id=admin_role_id)
     if not role:
-        # Le rôle n'existe pas dans ce serveur
         return False
     
     return role in interaction.user.roles
 
-def check_admin(interaction: discord.Interaction) -> bool:
+async def check_admin(interaction: discord.Interaction) -> bool:
     """Vérifie le rôle et envoie un message d'erreur si non autorisé"""
-    if not is_admin(interaction):
+    if not await is_admin(interaction):
         embed = discord.Embed(
             title="⛔ Accès refusé",
-            description="Vous n'avez pas la permission d'utiliser cette commande.\nSeul le rôle **crediteurs** peut l'utiliser.",
+            description="Vous n'avez pas la permission d'utiliser cette commande.",
             color=discord.Color.red()
         )
+        await interaction.response.send_message(embed=embed, ephemeral=True)
         return False
     return True
 
@@ -350,11 +410,11 @@ class SearchModal(Modal):
         self.add_item(self.ville)
     
     async def on_submit(self, interaction: discord.Interaction):
-        # Vérifier rôle "crediteurs"
-        if not is_admin(interaction):
+        # Vérifier rôle admin
+        if not await is_admin(interaction):
             embed = discord.Embed(
                 title="⛔ Accès refusé",
-                description="Vous n'avez pas la permission d'effectuer une recherche.\nSeul le rôle **crediteurs** peut le faire.",
+                description="Vous n'avez pas la permission d'effectuer une recherche.",
                 color=discord.Color.red()
             )
             await interaction.response.send_message(embed=embed, ephemeral=True)
@@ -433,11 +493,11 @@ class LookupModal(Modal):
         self.add_item(self.value_input)
     
     async def on_submit(self, interaction: discord.Interaction):
-        # Vérifier rôle "crediteurs"
-        if not is_admin(interaction):
+        # Vérifier rôle admin
+        if not await is_admin(interaction):
             embed = discord.Embed(
                 title="⛔ Accès refusé",
-                description="Vous n'avez pas la permission d'effectuer un lookup.\nSeul le rôle **crediteurs** peut le faire.",
+                description="Vous n'avez pas la permission d'effectuer un lookup.",
                 color=discord.Color.red()
             )
             await interaction.response.send_message(embed=embed, ephemeral=True)
@@ -602,10 +662,10 @@ class PanelView(View):
     
     @discord.ui.button(label="🔍 Recherche", style=discord.ButtonStyle.primary)
     async def search_button(self, interaction: discord.Interaction, button: Button):
-        if not is_admin(interaction):
+        if not await is_admin(interaction):
             embed = discord.Embed(
                 title="⛔ Accès refusé",
-                description="Vous n'avez pas la permission d'utiliser le panel.\nSeul le rôle **crediteurs** peut le faire.",
+                description="Vous n'avez pas la permission d'utiliser le panel.",
                 color=discord.Color.red()
             )
             await interaction.response.send_message(embed=embed, ephemeral=True)
@@ -614,10 +674,10 @@ class PanelView(View):
     
     @discord.ui.button(label="📧 Lookup Email", style=discord.ButtonStyle.success)
     async def lookup_email_button(self, interaction: discord.Interaction, button: Button):
-        if not is_admin(interaction):
+        if not await is_admin(interaction):
             embed = discord.Embed(
                 title="⛔ Accès refusé",
-                description="Vous n'avez pas la permission d'utiliser le panel.\nSeul le rôle **crediteurs** peut le faire.",
+                description="Vous n'avez pas la permission d'utiliser le panel.",
                 color=discord.Color.red()
             )
             await interaction.response.send_message(embed=embed, ephemeral=True)
@@ -626,10 +686,10 @@ class PanelView(View):
     
     @discord.ui.button(label="📱 Lookup Phone", style=discord.ButtonStyle.success)
     async def lookup_phone_button(self, interaction: discord.Interaction, button: Button):
-        if not is_admin(interaction):
+        if not await is_admin(interaction):
             embed = discord.Embed(
                 title="⛔ Accès refusé",
-                description="Vous n'avez pas la permission d'utiliser le panel.\nSeul le rôle **crediteurs** peut le faire.",
+                description="Vous n'avez pas la permission d'utiliser le panel.",
                 color=discord.Color.red()
             )
             await interaction.response.send_message(embed=embed, ephemeral=True)
@@ -638,10 +698,10 @@ class PanelView(View):
     
     @discord.ui.button(label="🏦 Lookup IBAN", style=discord.ButtonStyle.success)
     async def lookup_iban_button(self, interaction: discord.Interaction, button: Button):
-        if not is_admin(interaction):
+        if not await is_admin(interaction):
             embed = discord.Embed(
                 title="⛔ Accès refusé",
-                description="Vous n'avez pas la permission d'utiliser le panel.\nSeul le rôle **crediteurs** peut le faire.",
+                description="Vous n'avez pas la permission d'utiliser le panel.",
                 color=discord.Color.red()
             )
             await interaction.response.send_message(embed=embed, ephemeral=True)
@@ -650,10 +710,10 @@ class PanelView(View):
     
     @discord.ui.button(label="📊 Mon compte", style=discord.ButtonStyle.secondary)
     async def account_button(self, interaction: discord.Interaction, button: Button):
-        if not is_admin(interaction):
+        if not await is_admin(interaction):
             embed = discord.Embed(
                 title="⛔ Accès refusé",
-                description="Vous n'avez pas la permission d'utiliser le panel.\nSeul le rôle **crediteurs** peut le faire.",
+                description="Vous n'avez pas la permission d'utiliser le panel.",
                 color=discord.Color.red()
             )
             await interaction.response.send_message(embed=embed, ephemeral=True)
@@ -662,7 +722,6 @@ class PanelView(View):
         await interaction.response.defer(thinking=True, ephemeral=True)
         
         try:
-            # Créer l'utilisateur s'il n'existe pas
             await db.get_user(str(interaction.user.id))
             
             user_data = await db.get_user(str(interaction.user.id))
@@ -673,7 +732,6 @@ class PanelView(View):
             embed.add_field(name="🔍 Recherches", value=f"**{user_data.get('total_searches', 0)}**", inline=True)
             embed.add_field(name="🚫 Banni", value="✅ Oui" if await db.is_banned(str(interaction.user.id)) else "❌ Non", inline=True)
             
-            # API BrixHub
             me = await LookupAPI.get_me()
             if me.get("status") == 200:
                 data = me.get("data", {})
@@ -718,17 +776,15 @@ bot = Bot()
 # ============================================
 @bot.tree.command(name="panel", description="📊 Ouvrir le panel de recherche")
 async def panel(interaction: discord.Interaction):
-    # Vérifier rôle "crediteurs"
-    if not is_admin(interaction):
+    if not await is_admin(interaction):
         embed = discord.Embed(
             title="⛔ Accès refusé",
-            description="Vous n'avez pas la permission d'utiliser cette commande.\nSeul le rôle **crediteurs** peut l'utiliser.",
+            description="Vous n'avez pas la permission d'utiliser cette commande.",
             color=discord.Color.red()
         )
         await interaction.response.send_message(embed=embed, ephemeral=True)
         return
     
-    # Créer l'utilisateur dès le /panel
     await db.get_user(str(interaction.user.id))
     
     embed = discord.Embed(
@@ -743,12 +799,45 @@ async def panel(interaction: discord.Interaction):
     view = PanelView()
     await interaction.response.send_message(embed=embed, view=view)
 
-@bot.tree.command(name="addcredits", description="💰 Ajouter des crédits (rôle crediteurs)")
+@bot.tree.command(name="config", description="⚙️ Configurer le rôle admin (utilisable 1 fois)")
+async def config(interaction: discord.Interaction, role: discord.Role):
+    """Définit le rôle qui pourra utiliser toutes les commandes (utilisable 1 fois)"""
+    
+    # Vérifier si un rôle est déjà configuré
+    existing_role_id = await db.get_admin_role()
+    if existing_role_id:
+        existing_role = discord.utils.get(interaction.guild.roles, id=existing_role_id)
+        embed = discord.Embed(
+            title="❌ Configuration déjà effectuée",
+            description=f"Un rôle admin est déjà configuré : {existing_role.mention if existing_role else 'ID: ' + str(existing_role_id)}\n\nContacte un administrateur pour modifier la configuration.",
+            color=discord.Color.red()
+        )
+        await interaction.response.send_message(embed=embed, ephemeral=True)
+        return
+    
+    # Définir le nouveau rôle
+    await db.set_admin_role(role.id)
+    
+    embed = discord.Embed(
+        title="✅ Configuration terminée",
+        description=f"Le rôle **{role.name}** peut maintenant utiliser toutes les commandes du bot.",
+        color=discord.Color.green()
+    )
+    embed.add_field(
+        name="📋 Rôle configuré",
+        value=f"ID: `{role.id}`\nMention: {role.mention}",
+        inline=False
+    )
+    embed.set_footer(text="Cette configuration ne peut être modifiée qu'en base de données.")
+    
+    await interaction.response.send_message(embed=embed)
+
+@bot.tree.command(name="addcredits", description="💰 Ajouter des crédits")
 async def add_credits(interaction: discord.Interaction, utilisateur: discord.Member, montant: int):
-    if not is_admin(interaction):
+    if not await is_admin(interaction):
         embed = discord.Embed(
             title="⛔ Accès refusé",
-            description="Vous n'avez pas la permission d'utiliser cette commande.\nSeul le rôle **crediteurs** peut l'utiliser.",
+            description="Vous n'avez pas la permission d'utiliser cette commande.",
             color=discord.Color.red()
         )
         await interaction.response.send_message(embed=embed, ephemeral=True)
@@ -759,19 +848,18 @@ async def add_credits(interaction: discord.Interaction, utilisateur: discord.Mem
         await interaction.response.send_message(embed=embed, ephemeral=True)
         return
     
-    # Créer l'utilisateur s'il n'existe pas
     await db.get_user(str(utilisateur.id))
     await db.add_credits(str(utilisateur.id), montant)
     
     embed = discord.Embed(title="✅ Crédits ajoutés", description=f"{montant} crédit(s) ajouté(s) à {utilisateur.mention}", color=discord.Color.green())
     await interaction.response.send_message(embed=embed, ephemeral=True)
 
-@bot.tree.command(name="removecredits", description="💰 Enlever des crédits (rôle crediteurs)")
+@bot.tree.command(name="removecredits", description="💰 Enlever des crédits")
 async def remove_credits(interaction: discord.Interaction, utilisateur: discord.Member, montant: int):
-    if not is_admin(interaction):
+    if not await is_admin(interaction):
         embed = discord.Embed(
             title="⛔ Accès refusé",
-            description="Vous n'avez pas la permission d'utiliser cette commande.\nSeul le rôle **crediteurs** peut l'utiliser.",
+            description="Vous n'avez pas la permission d'utiliser cette commande.",
             color=discord.Color.red()
         )
         await interaction.response.send_message(embed=embed, ephemeral=True)
@@ -782,7 +870,6 @@ async def remove_credits(interaction: discord.Interaction, utilisateur: discord.
         await interaction.response.send_message(embed=embed, ephemeral=True)
         return
     
-    # Créer l'utilisateur s'il n'existe pas
     await db.get_user(str(utilisateur.id))
     await db.remove_credits(str(utilisateur.id), montant)
     
@@ -791,10 +878,10 @@ async def remove_credits(interaction: discord.Interaction, utilisateur: discord.
 
 @bot.tree.command(name="look", description="🔍 Voir les statistiques d'un utilisateur")
 async def look(interaction: discord.Interaction, utilisateur: discord.Member):
-    if not is_admin(interaction):
+    if not await is_admin(interaction):
         embed = discord.Embed(
             title="⛔ Accès refusé",
-            description="Vous n'avez pas la permission d'utiliser cette commande.\nSeul le rôle **crediteurs** peut l'utiliser.",
+            description="Vous n'avez pas la permission d'utiliser cette commande.",
             color=discord.Color.red()
         )
         await interaction.response.send_message(embed=embed, ephemeral=True)
@@ -822,12 +909,12 @@ async def look(interaction: discord.Interaction, utilisateur: discord.Member):
     embed.set_footer(text="Created by Index")
     await interaction.response.send_message(embed=embed, ephemeral=True)
 
-@bot.tree.command(name="ban", description="⛔ Bannir un utilisateur (rôle crediteurs)")
+@bot.tree.command(name="ban", description="⛔ Bannir un utilisateur")
 async def ban_user(interaction: discord.Interaction, utilisateur: discord.Member):
-    if not is_admin(interaction):
+    if not await is_admin(interaction):
         embed = discord.Embed(
             title="⛔ Accès refusé",
-            description="Vous n'avez pas la permission d'utiliser cette commande.\nSeul le rôle **crediteurs** peut l'utiliser.",
+            description="Vous n'avez pas la permission d'utiliser cette commande.",
             color=discord.Color.red()
         )
         await interaction.response.send_message(embed=embed, ephemeral=True)
@@ -842,12 +929,12 @@ async def ban_user(interaction: discord.Interaction, utilisateur: discord.Member
     embed = discord.Embed(title="⛔ Utilisateur banni", description=f"{utilisateur.mention} a été banni.", color=discord.Color.red())
     await interaction.response.send_message(embed=embed)
 
-@bot.tree.command(name="unban", description="✅ Débannir un utilisateur (rôle crediteurs)")
+@bot.tree.command(name="unban", description="✅ Débannir un utilisateur")
 async def unban_user(interaction: discord.Interaction, utilisateur: discord.Member):
-    if not is_admin(interaction):
+    if not await is_admin(interaction):
         embed = discord.Embed(
             title="⛔ Accès refusé",
-            description="Vous n'avez pas la permission d'utiliser cette commande.\nSeul le rôle **crediteurs** peut l'utiliser.",
+            description="Vous n'avez pas la permission d'utiliser cette commande.",
             color=discord.Color.red()
         )
         await interaction.response.send_message(embed=embed, ephemeral=True)
@@ -857,38 +944,43 @@ async def unban_user(interaction: discord.Interaction, utilisateur: discord.Memb
     embed = discord.Embed(title="✅ Utilisateur débanni", description=f"{utilisateur.mention} peut maintenant effectuer des recherches.", color=discord.Color.green())
     await interaction.response.send_message(embed=embed)
 
-# ============================================
-# COMMANDE DE DEBUG
-# ============================================
-@bot.tree.command(name="checkrole", description="🔍 Vérifier votre rôle 'crediteurs'")
+@bot.tree.command(name="checkrole", description="🔍 Vérifier le rôle admin configuré")
 async def checkrole(interaction: discord.Interaction):
+    admin_role_id = await db.get_admin_role()
+    
     embed = discord.Embed(
-        title="🔍 Vérification du rôle crediteurs",
+        title="🔍 Configuration du rôle admin",
         color=discord.Color.blue(),
         timestamp=datetime.now()
     )
     
-    # Vérifier le rôle
-    role = discord.utils.get(interaction.guild.roles, id=ADMIN_ROLE_ID)
-    
-    if role:
-        has_role = role in interaction.user.roles
-        embed.add_field(
-            name="✅ Rôle 'crediteurs' trouvé",
-            value=f"**Nom:** {role.name}\n**ID:** `{role.id}`\n\n**Vous avez ce rôle:** {'✅ Oui' if has_role else '❌ Non'}",
-            inline=False
-        )
+    if admin_role_id:
+        role = discord.utils.get(interaction.guild.roles, id=admin_role_id)
+        if role:
+            has_role = role in interaction.user.roles
+            embed.add_field(
+                name="✅ Rôle configuré",
+                value=f"**Nom:** {role.name}\n**ID:** `{role.id}`\n**Mention:** {role.mention}\n\n**Vous avez ce rôle:** {'✅ Oui' if has_role else '❌ Non'}",
+                inline=False
+            )
+        else:
+            embed.add_field(
+                name="⚠️ Rôle introuvable",
+                value=f"Le rôle avec l'ID `{admin_role_id}` n'existe plus dans ce serveur.\n\n💡 Utilise `/config` pour en définir un nouveau.",
+                inline=False
+            )
     else:
         embed.add_field(
-            name="❌ Rôle 'crediteurs' non trouvé",
-            value=f"Le rôle avec l'ID `{ADMIN_ROLE_ID}` n'existe pas dans ce serveur !\n\n💡 **Solution:** Crée le rôle ou vérifie l'ID.",
+            name="❌ Aucun rôle configuré",
+            value="Aucun rôle admin n'a été configuré.\n\n💡 Utilise `/config` pour définir le rôle qui pourra utiliser les commandes.",
             inline=False
         )
     
     # Lister les rôles du serveur
     roles_list = ""
     for r in interaction.guild.roles:
-        roles_list += f"<@&{r.id}> → `{r.id}`\n"
+        if r.name != "@everyone":
+            roles_list += f"<@&{r.id}> → `{r.id}`\n"
     
     if roles_list:
         embed.add_field(name="📋 Rôles du serveur", value=roles_list[:1000], inline=False)
@@ -903,7 +995,6 @@ async def checkrole(interaction: discord.Interaction):
 async def on_ready():
     print(f"✅ Bot connecté en tant que {bot.user}")
     print(f"✅ Invité dans {len(bot.guilds)} serveurs")
-    print(f"✅ Rôle admin ID: {ADMIN_ROLE_ID} (crediteurs)")
     
     # Initialiser la base de données
     success = await db.init()
@@ -911,6 +1002,11 @@ async def on_ready():
         print("❌ Échec de connexion à PostgreSQL - vérifie DATABASE_URL")
     else:
         print("✅ Base de données prête")
+        admin_role = await db.get_admin_role()
+        if admin_role:
+            print(f"✅ Rôle admin configuré: {admin_role}")
+        else:
+            print("ℹ️ Aucun rôle admin configuré - Utilise /config pour en définir un")
     
     print("✅ Created by Index")
 
