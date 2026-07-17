@@ -6,7 +6,7 @@ import aiohttp
 from datetime import datetime
 from typing import Dict, List, Any
 import json
-import io
+import asyncio
 
 # ============================================
 # CONFIGURATION
@@ -19,7 +19,6 @@ HEADERS = {
     "Content-Type": "application/json"
 }
 
-# Fichier de configuration
 CONFIG_FILE = "config.json"
 
 # ============================================
@@ -58,7 +57,6 @@ config = ConfigManager()
 # FONCTION ADMIN
 # ============================================
 def is_admin(interaction: discord.Interaction) -> bool:
-    """Vérifie si l'utilisateur a le rôle admin configuré"""
     if not interaction.guild:
         return False
     
@@ -72,6 +70,16 @@ def is_admin(interaction: discord.Interaction) -> bool:
     
     return role in interaction.user.roles
 
+def check_admin(interaction: discord.Interaction):
+    if not is_admin(interaction):
+        embed = discord.Embed(
+            title="⛔ Accès refusé",
+            description="Vous n'avez pas la permission.",
+            color=discord.Color.red()
+        )
+        return embed
+    return None
+
 # ============================================
 # MODAL DE RECHERCHE
 # ============================================
@@ -82,10 +90,10 @@ class SearchModal(Modal):
         self.prenom = TextInput(label="Prénom", placeholder="Jean", required=False, max_length=50)
         self.add_item(self.prenom)
         
-        self.nom = TextInput(label="Nom de famille", placeholder="Dupont", required=False, max_length=50)
+        self.nom = TextInput(label="Nom", placeholder="Dupont", required=False, max_length=50)
         self.add_item(self.nom)
         
-        self.email = TextInput(label="Email", placeholder="jean.dupont@email.com", required=False, max_length=100)
+        self.email = TextInput(label="Email", placeholder="jean@email.com", required=False, max_length=100)
         self.add_item(self.email)
         
         self.telephone = TextInput(label="Téléphone", placeholder="0612345678", required=False, max_length=20)
@@ -95,17 +103,15 @@ class SearchModal(Modal):
         self.add_item(self.ville)
     
     async def on_submit(self, interaction: discord.Interaction):
-        if not is_admin(interaction):
-            embed = discord.Embed(
-                title="⛔ Accès refusé",
-                description="Vous n'avez pas la permission d'effectuer une recherche.",
-                color=discord.Color.red()
-            )
-            await interaction.response.send_message(embed=embed, ephemeral=True)
+        # Vérifier admin
+        error = check_admin(interaction)
+        if error:
+            await interaction.response.send_message(embed=error, ephemeral=True)
             return
         
         await interaction.response.defer(thinking=True, ephemeral=True)
         
+        # Construire la requête
         query = {}
         if self.prenom.value: query["prenom"] = self.prenom.value
         if self.nom.value: query["nom_famille"] = self.nom.value
@@ -114,7 +120,7 @@ class SearchModal(Modal):
         if self.ville.value: query["ville"] = self.ville.value
         
         if not query:
-            embed = discord.Embed(title="❌ Erreur", description="Veuillez remplir au moins un champ !", color=discord.Color.red())
+            embed = discord.Embed(title="❌ Erreur", description="Remplis au moins un champ !", color=discord.Color.red())
             await interaction.followup.send(embed=embed, ephemeral=True)
             return
         
@@ -133,18 +139,16 @@ class SearchModal(Modal):
                     
                     if result.get("status") == 200:
                         results = result.get("data", {}).get("results", [])
-                        
                         if results:
                             view = PaginationView(results, page=0, user_id=interaction.user.id)
                             embed = view.create_embed()
                             await interaction.followup.send(embed=embed, view=view, ephemeral=True)
                         else:
-                            embed = discord.Embed(title="❌ Aucun résultat", description="Aucune personne trouvée.", color=discord.Color.orange())
+                            embed = discord.Embed(title="❌ Aucun résultat", color=discord.Color.orange())
                             await interaction.followup.send(embed=embed, ephemeral=True)
                     else:
                         embed = discord.Embed(title="❌ Erreur API", color=discord.Color.red())
                         await interaction.followup.send(embed=embed, ephemeral=True)
-                
         except Exception as e:
             embed = discord.Embed(title="❌ Erreur", description=str(e), color=discord.Color.red())
             await interaction.followup.send(embed=embed, ephemeral=True)
@@ -157,20 +161,25 @@ class LookupModal(Modal):
         super().__init__(title=f"🔍 Lookup {lookup_type.capitalize()}")
         self.lookup_type = lookup_type
         
-        placeholder = {"email": "jean.dupont@gmail.com", "phone": "0612345678", "iban": "FR7630006000011234567890189"}.get(lookup_type, "")
-        label = {"email": "Adresse email", "phone": "Numéro de téléphone", "iban": "IBAN"}.get(lookup_type, lookup_type)
+        placeholder = {
+            "email": "jean.dupont@gmail.com",
+            "phone": "0612345678",
+            "iban": "FR7630006000011234567890189"
+        }.get(lookup_type, "")
+        
+        label = {
+            "email": "Adresse email",
+            "phone": "Numéro de téléphone",
+            "iban": "IBAN"
+        }.get(lookup_type, lookup_type)
         
         self.value_input = TextInput(label=label, placeholder=placeholder, required=True, max_length=100)
         self.add_item(self.value_input)
     
     async def on_submit(self, interaction: discord.Interaction):
-        if not is_admin(interaction):
-            embed = discord.Embed(
-                title="⛔ Accès refusé",
-                description="Vous n'avez pas la permission d'effectuer un lookup.",
-                color=discord.Color.red()
-            )
-            await interaction.response.send_message(embed=embed, ephemeral=True)
+        error = check_admin(interaction)
+        if error:
+            await interaction.response.send_message(embed=error, ephemeral=True)
             return
         
         await interaction.response.defer(thinking=True, ephemeral=True)
@@ -188,24 +197,21 @@ class LookupModal(Modal):
                 raise ValueError("Type non supporté")
             
             async with aiohttp.ClientSession() as session:
-                async with session.get(endpoint, headers=HEADERS) as response:
+                async with session.get(endpoint, headers=HEADERS, timeout=aiohttp.ClientTimeout(total=30)) as response:
                     result = await response.json()
                     
                     if result.get("status") == 200:
                         results = result.get("data", {}).get("results", [])
-                        
                         if results:
                             embed = discord.Embed(
                                 title=f"🔍 Résultats lookup {self.lookup_type}",
                                 description=f"**{len(results)}** résultat(s)",
                                 color=discord.Color.green()
                             )
-                            
                             for i, record in enumerate(results[:5], 1):
                                 fields = [f"**{k}**: {v}" for k, v in record.items() if not k.startswith("_") and v]
                                 if fields:
                                     embed.add_field(name=f"📝 #{i}", value="\n".join(fields[:10]), inline=False)
-                            
                             await interaction.followup.send(embed=embed, ephemeral=True)
                         else:
                             embed = discord.Embed(title="❌ Aucun résultat", color=discord.Color.orange())
@@ -213,7 +219,6 @@ class LookupModal(Modal):
                     else:
                         embed = discord.Embed(title="❌ Erreur API", color=discord.Color.red())
                         await interaction.followup.send(embed=embed, ephemeral=True)
-                
         except Exception as e:
             embed = discord.Embed(title="❌ Erreur", description=str(e), color=discord.Color.red())
             await interaction.followup.send(embed=embed, ephemeral=True)
@@ -223,7 +228,7 @@ class LookupModal(Modal):
 # ============================================
 class PaginationView(View):
     def __init__(self, results: List[Dict], page: int = 0, user_id: int = None):
-        super().__init__(timeout=300)
+        super().__init__(timeout=120)
         self.results = results
         self.page = page
         self.user_id = user_id
@@ -243,7 +248,6 @@ class PaginationView(View):
         if self.page < len(self.results):
             person = self.results[self.page]
             fields = []
-            
             for key, value in person.items():
                 if key.startswith("_"): continue
                 if value:
@@ -263,20 +267,20 @@ class PaginationView(View):
     def update_buttons(self):
         self.clear_items()
         
-        prev_button = Button(label="◀", style=discord.ButtonStyle.primary, disabled=self.page == 0)
-        prev_button.callback = self.previous_page
-        self.add_item(prev_button)
+        prev = Button(label="◀", style=discord.ButtonStyle.primary, disabled=self.page == 0)
+        prev.callback = self.previous_page
+        self.add_item(prev)
         
-        page_button = Button(label=f"{self.page + 1}/{self.total_pages}", style=discord.ButtonStyle.grey, disabled=True)
-        self.add_item(page_button)
+        page_btn = Button(label=f"{self.page + 1}/{self.total_pages}", style=discord.ButtonStyle.grey, disabled=True)
+        self.add_item(page_btn)
         
-        next_button = Button(label="▶", style=discord.ButtonStyle.primary, disabled=self.page >= self.total_pages - 1)
-        next_button.callback = self.next_page
-        self.add_item(next_button)
+        next_btn = Button(label="▶", style=discord.ButtonStyle.primary, disabled=self.page >= self.total_pages - 1)
+        next_btn.callback = self.next_page
+        self.add_item(next_btn)
         
-        close_button = Button(label="❌", style=discord.ButtonStyle.danger)
-        close_button.callback = self.close_panel
-        self.add_item(close_button)
+        close = Button(label="❌", style=discord.ButtonStyle.danger)
+        close.callback = self.close_panel
+        self.add_item(close)
     
     async def update_embed(self, interaction: discord.Interaction):
         embed = self.create_embed()
@@ -305,41 +309,41 @@ class PanelView(View):
     
     @discord.ui.button(label="🔍 Recherche", style=discord.ButtonStyle.primary)
     async def search_button(self, interaction: discord.Interaction, button: Button):
-        if not is_admin(interaction):
-            embed = discord.Embed(title="⛔ Accès refusé", description="Vous n'avez pas la permission.", color=discord.Color.red())
-            await interaction.response.send_message(embed=embed, ephemeral=True)
+        error = check_admin(interaction)
+        if error:
+            await interaction.response.send_message(embed=error, ephemeral=True)
             return
         await interaction.response.send_modal(SearchModal())
     
     @discord.ui.button(label="📧 Lookup Email", style=discord.ButtonStyle.success)
     async def lookup_email_button(self, interaction: discord.Interaction, button: Button):
-        if not is_admin(interaction):
-            embed = discord.Embed(title="⛔ Accès refusé", description="Vous n'avez pas la permission.", color=discord.Color.red())
-            await interaction.response.send_message(embed=embed, ephemeral=True)
+        error = check_admin(interaction)
+        if error:
+            await interaction.response.send_message(embed=error, ephemeral=True)
             return
         await interaction.response.send_modal(LookupModal("email"))
     
     @discord.ui.button(label="📱 Lookup Phone", style=discord.ButtonStyle.success)
     async def lookup_phone_button(self, interaction: discord.Interaction, button: Button):
-        if not is_admin(interaction):
-            embed = discord.Embed(title="⛔ Accès refusé", description="Vous n'avez pas la permission.", color=discord.Color.red())
-            await interaction.response.send_message(embed=embed, ephemeral=True)
+        error = check_admin(interaction)
+        if error:
+            await interaction.response.send_message(embed=error, ephemeral=True)
             return
         await interaction.response.send_modal(LookupModal("phone"))
     
     @discord.ui.button(label="🏦 Lookup IBAN", style=discord.ButtonStyle.success)
     async def lookup_iban_button(self, interaction: discord.Interaction, button: Button):
-        if not is_admin(interaction):
-            embed = discord.Embed(title="⛔ Accès refusé", description="Vous n'avez pas la permission.", color=discord.Color.red())
-            await interaction.response.send_message(embed=embed, ephemeral=True)
+        error = check_admin(interaction)
+        if error:
+            await interaction.response.send_message(embed=error, ephemeral=True)
             return
         await interaction.response.send_modal(LookupModal("iban"))
     
     @discord.ui.button(label="📊 Mon compte", style=discord.ButtonStyle.secondary)
     async def account_button(self, interaction: discord.Interaction, button: Button):
-        if not is_admin(interaction):
-            embed = discord.Embed(title="⛔ Accès refusé", description="Vous n'avez pas la permission.", color=discord.Color.red())
-            await interaction.response.send_message(embed=embed, ephemeral=True)
+        error = check_admin(interaction)
+        if error:
+            await interaction.response.send_message(embed=error, ephemeral=True)
             return
         
         embed = discord.Embed(title="📊 Mon compte", color=discord.Color.purple(), timestamp=datetime.now())
@@ -350,7 +354,7 @@ class PanelView(View):
 # ============================================
 # CRÉATION DU BOT
 # ============================================
-class Bot(discord.Client):
+class MyBot(discord.Client):
     def __init__(self):
         intents = discord.Intents.default()
         intents.message_content = True
@@ -361,79 +365,54 @@ class Bot(discord.Client):
         await self.tree.sync()
         print("✅ Commandes synchronisées")
 
-bot = Bot()
+bot = MyBot()
 
 # ============================================
 # COMMANDES
 # ============================================
 @bot.tree.command(name="config", description="⚙️ Configurer le rôle admin (1 fois)")
 async def config(interaction: discord.Interaction, role: discord.Role):
-    """Définit le rôle qui pourra utiliser toutes les commandes"""
-    
-    # Vérifier si déjà configuré
     if config.is_configured():
         admin_id = config.get_admin_role()
-        existing_role = discord.utils.get(interaction.guild.roles, id=admin_id)
+        existing = discord.utils.get(interaction.guild.roles, id=admin_id)
         embed = discord.Embed(
             title="❌ Déjà configuré",
-            description=f"Un rôle est déjà défini : {existing_role.mention if existing_role else 'ID: ' + str(admin_id)}\n\n⚠️ Pour réinitialiser, supprime le fichier config.json sur Railway.",
+            description=f"Rôle défini : {existing.mention if existing else 'ID: ' + str(admin_id)}",
             color=discord.Color.red()
         )
         await interaction.response.send_message(embed=embed, ephemeral=True)
         return
     
-    # Définir le rôle
     config.set_admin_role(role.id)
-    
     embed = discord.Embed(
         title="✅ Configuration réussie !",
         description=f"Le rôle **{role.name}** peut maintenant utiliser toutes les commandes.",
         color=discord.Color.green()
     )
-    embed.add_field(name="📋 Rôle configuré", value=f"ID: `{role.id}`\nMention: {role.mention}", inline=False)
-    embed.set_footer(text="Cette configuration ne peut être modifiée qu'en supprimant config.json")
-    
     await interaction.response.send_message(embed=embed)
 
 @bot.tree.command(name="checkrole", description="🔍 Voir le rôle admin configuré")
 async def checkrole(interaction: discord.Interaction):
     admin_id = config.get_admin_role()
-    
-    embed = discord.Embed(title="🔍 Rôle admin configuré", color=discord.Color.blue(), timestamp=datetime.now())
+    embed = discord.Embed(title="🔍 Rôle admin", color=discord.Color.blue())
     
     if admin_id:
         role = discord.utils.get(interaction.guild.roles, id=admin_id)
         if role:
             has = role in interaction.user.roles
-            embed.add_field(
-                name="✅ Rôle trouvé",
-                value=f"**Nom:** {role.name}\n**ID:** `{role.id}`\n**Vous l'avez:** {'✅ Oui' if has else '❌ Non'}",
-                inline=False
-            )
+            embed.description = f"**{role.name}**\nID: `{role.id}`\n\nTu l'as : {'✅ Oui' if has else '❌ Non'}"
         else:
-            embed.add_field(
-                name="⚠️ Rôle introuvable",
-                value=f"Le rôle avec l'ID `{admin_id}` n'existe plus !",
-                inline=False
-            )
+            embed.description = f"Rôle introuvable (ID: {admin_id})"
     else:
-        embed.add_field(
-            name="❌ Aucun rôle configuré",
-            value="Utilise `/config` pour définir le rôle admin.",
-            inline=False
-        )
+        embed.description = "Aucun rôle configuré. Utilise `/config`."
     
     await interaction.response.send_message(embed=embed, ephemeral=True)
 
 @bot.tree.command(name="panel", description="📊 Ouvrir le panel")
 async def panel(interaction: discord.Interaction):
-    if not is_admin(interaction):
-        embed = discord.Embed(
-            title="⛔ Accès refusé",
-            description="Vous n'avez pas la permission d'utiliser cette commande.",
-            color=discord.Color.red()
-        )
-        await interaction.response.send_message(embed=embed, ephemeral=True)
+    error = check_admin(interaction)
+    if error:
+        await interaction.response.send_message(embed=error, ephemeral=True)
         return
     
     embed = discord.Embed(
@@ -450,32 +429,32 @@ async def panel(interaction: discord.Interaction):
 
 @bot.tree.command(name="addcredits", description="💰 Ajouter des crédits")
 async def add_credits(interaction: discord.Interaction, utilisateur: discord.Member, montant: int):
-    if not is_admin(interaction):
-        embed = discord.Embed(title="⛔ Accès refusé", description="Vous n'avez pas la permission.", color=discord.Color.red())
-        await interaction.response.send_message(embed=embed, ephemeral=True)
+    error = check_admin(interaction)
+    if error:
+        await interaction.response.send_message(embed=error, ephemeral=True)
         return
     
-    embed = discord.Embed(title="✅ Crédits ajoutés", description=f"{montant} crédit(s) à {utilisateur.mention}", color=discord.Color.green())
+    embed = discord.Embed(title="✅ Crédits ajoutés", description=f"{montant} crédits à {utilisateur.mention}", color=discord.Color.green())
     await interaction.response.send_message(embed=embed, ephemeral=True)
 
 @bot.tree.command(name="removecredits", description="💰 Enlever des crédits")
 async def remove_credits(interaction: discord.Interaction, utilisateur: discord.Member, montant: int):
-    if not is_admin(interaction):
-        embed = discord.Embed(title="⛔ Accès refusé", description="Vous n'avez pas la permission.", color=discord.Color.red())
-        await interaction.response.send_message(embed=embed, ephemeral=True)
+    error = check_admin(interaction)
+    if error:
+        await interaction.response.send_message(embed=error, ephemeral=True)
         return
     
-    embed = discord.Embed(title="✅ Crédits retirés", description=f"{montant} crédit(s) retiré(s) à {utilisateur.mention}", color=discord.Color.orange())
+    embed = discord.Embed(title="✅ Crédits retirés", description=f"{montant} crédits à {utilisateur.mention}", color=discord.Color.orange())
     await interaction.response.send_message(embed=embed, ephemeral=True)
 
 @bot.tree.command(name="look", description="🔍 Voir les stats")
 async def look(interaction: discord.Interaction, utilisateur: discord.Member):
-    if not is_admin(interaction):
-        embed = discord.Embed(title="⛔ Accès refusé", description="Vous n'avez pas la permission.", color=discord.Color.red())
-        await interaction.response.send_message(embed=embed, ephemeral=True)
+    error = check_admin(interaction)
+    if error:
+        await interaction.response.send_message(embed=error, ephemeral=True)
         return
     
-    embed = discord.Embed(title=f"📊 Stats de {utilisateur.display_name}", color=discord.Color.blue(), timestamp=datetime.now())
+    embed = discord.Embed(title=f"📊 Stats de {utilisateur.display_name}", color=discord.Color.blue())
     embed.add_field(name="💰 Crédits", value="10", inline=True)
     embed.add_field(name="🔍 Recherches", value="0", inline=True)
     embed.set_footer(text="Created by Index")
@@ -483,22 +462,22 @@ async def look(interaction: discord.Interaction, utilisateur: discord.Member):
 
 @bot.tree.command(name="ban", description="⛔ Bannir")
 async def ban_user(interaction: discord.Interaction, utilisateur: discord.Member):
-    if not is_admin(interaction):
-        embed = discord.Embed(title="⛔ Accès refusé", description="Vous n'avez pas la permission.", color=discord.Color.red())
-        await interaction.response.send_message(embed=embed, ephemeral=True)
+    error = check_admin(interaction)
+    if error:
+        await interaction.response.send_message(embed=error, ephemeral=True)
         return
     
-    embed = discord.Embed(title="⛔ Utilisateur banni", description=f"{utilisateur.mention} a été banni.", color=discord.Color.red())
+    embed = discord.Embed(title="⛔ Banni", description=f"{utilisateur.mention} banni.", color=discord.Color.red())
     await interaction.response.send_message(embed=embed)
 
 @bot.tree.command(name="unban", description="✅ Débannir")
 async def unban_user(interaction: discord.Interaction, utilisateur: discord.Member):
-    if not is_admin(interaction):
-        embed = discord.Embed(title="⛔ Accès refusé", description="Vous n'avez pas la permission.", color=discord.Color.red())
-        await interaction.response.send_message(embed=embed, ephemeral=True)
+    error = check_admin(interaction)
+    if error:
+        await interaction.response.send_message(embed=error, ephemeral=True)
         return
     
-    embed = discord.Embed(title="✅ Utilisateur débanni", description=f"{utilisateur.mention} peut maintenant utiliser le bot.", color=discord.Color.green())
+    embed = discord.Embed(title="✅ Débanni", description=f"{utilisateur.mention} débanni.", color=discord.Color.green())
     await interaction.response.send_message(embed=embed)
 
 # ============================================
@@ -522,13 +501,11 @@ async def on_ready():
 # ============================================
 if __name__ == "__main__":
     if not BOT_TOKEN:
-        print("❌ ERREUR: DISCORD_TOKEN non défini !")
+        print("❌ DISCORD_TOKEN non défini !")
     elif not API_KEY:
-        print("❌ ERREUR: BRIXHUB_API_KEY non défini !")
+        print("❌ BRIXHUB_API_KEY non défini !")
     else:
         try:
-            bot.run(BOT_TOKEN)
-        except discord.LoginFailure:
-            print("❌ ERREUR: Token Discord invalide !")
+            bot.run(BOT_TOKEN, reconnect=True)
         except Exception as e:
             print(f"❌ ERREUR: {e}")
