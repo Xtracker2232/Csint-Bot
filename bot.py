@@ -6,6 +6,8 @@ import aiohttp
 from datetime import datetime
 from typing import Dict, List, Any
 import asyncio
+import json
+import io
 
 # ============================================
 # CONFIGURATION
@@ -17,6 +19,79 @@ HEADERS = {
     "X-API-Key": API_KEY,
     "Content-Type": "application/json"
 }
+
+# ID du rôle Admin
+ADMIN_ROLE_ID = 1527750818986590248
+
+# Fichier de base de données (stockage des crédits, historique, bans)
+DB_FILE = "data.json"
+
+# ============================================
+# GESTIONNAIRE DE BASE DE DONNÉES
+# ============================================
+class Database:
+    def __init__(self):
+        self.data = {}
+        self.load()
+    
+    def load(self):
+        try:
+            with open(DB_FILE, "r") as f:
+                self.data = json.load(f)
+        except (FileNotFoundError, json.JSONDecodeError):
+            self.data = {"users": {}, "bans": []}
+            self.save()
+    
+    def save(self):
+        with open(DB_FILE, "w") as f:
+            json.dump(self.data, f, indent=2)
+    
+    def get_user(self, user_id: str):
+        if user_id not in self.data["users"]:
+            self.data["users"][user_id] = {
+                "credits": 0,
+                "total_searches": 0,
+                "history": []
+            }
+            self.save()
+        return self.data["users"][user_id]
+    
+    def add_credits(self, user_id: str, amount: int):
+        user = self.get_user(user_id)
+        user["credits"] += amount
+        self.save()
+    
+    def remove_credits(self, user_id: str, amount: int):
+        user = self.get_user(user_id)
+        user["credits"] = max(0, user["credits"] - amount)
+        self.save()
+    
+    def add_search_history(self, user_id: str, query: str, results: int):
+        user = self.get_user(user_id)
+        user["total_searches"] += 1
+        user["history"].insert(0, {
+            "query": query,
+            "results": results,
+            "date": datetime.now().isoformat()
+        })
+        # Garder seulement les 10 dernières recherches
+        user["history"] = user["history"][:10]
+        self.save()
+    
+    def ban_user(self, user_id: str):
+        if user_id not in self.data["bans"]:
+            self.data["bans"].append(user_id)
+            self.save()
+    
+    def unban_user(self, user_id: str):
+        if user_id in self.data["bans"]:
+            self.data["bans"].remove(user_id)
+            self.save()
+    
+    def is_banned(self, user_id: str) -> bool:
+        return user_id in self.data["bans"]
+
+db = Database()
 
 # ============================================
 # API HANDLER
@@ -153,6 +228,27 @@ class SearchModal(Modal):
         self.add_item(self.ville)
     
     async def on_submit(self, interaction: discord.Interaction):
+        # Vérifier si l'utilisateur est banni
+        if db.is_banned(str(interaction.user.id)):
+            embed = discord.Embed(
+                title="⛔ Accès refusé",
+                description="Vous avez été banni et ne pouvez plus effectuer de recherches.",
+                color=discord.Color.red()
+            )
+            await interaction.response.send_message(embed=embed, ephemeral=True)
+            return
+        
+        # Vérifier les crédits
+        user_data = db.get_user(str(interaction.user.id))
+        if user_data["credits"] <= 0:
+            embed = discord.Embed(
+                title="❌ Crédits insuffisants",
+                description="Vous n'avez plus de crédits. Contactez un administrateur.",
+                color=discord.Color.red()
+            )
+            await interaction.response.send_message(embed=embed, ephemeral=True)
+            return
+        
         await interaction.response.defer(thinking=True, ephemeral=True)
         
         query = {}
@@ -187,6 +283,12 @@ class SearchModal(Modal):
                 total = result.get("meta", {}).get("total", 0)
                 
                 if results:
+                    # Déduire 1 crédit
+                    db.remove_credits(str(interaction.user.id), 1)
+                    # Ajouter à l'historique
+                    query_str = ", ".join([f"{k}={v}" for k, v in query.items() if k not in ["flexible", "per_page"]])
+                    db.add_search_history(str(interaction.user.id), query_str, len(results))
+                    
                     view = PaginationView(results, page=0, query=query, user_id=interaction.user.id)
                     embed = view.create_embed()
                     await interaction.followup.send(embed=embed, view=view, ephemeral=True)
@@ -243,6 +345,27 @@ class LookupModal(Modal):
         self.add_item(self.value_input)
     
     async def on_submit(self, interaction: discord.Interaction):
+        # Vérifier si l'utilisateur est banni
+        if db.is_banned(str(interaction.user.id)):
+            embed = discord.Embed(
+                title="⛔ Accès refusé",
+                description="Vous avez été banni et ne pouvez plus effectuer de recherches.",
+                color=discord.Color.red()
+            )
+            await interaction.response.send_message(embed=embed, ephemeral=True)
+            return
+        
+        # Vérifier les crédits
+        user_data = db.get_user(str(interaction.user.id))
+        if user_data["credits"] <= 0:
+            embed = discord.Embed(
+                title="❌ Crédits insuffisants",
+                description="Vous n'avez plus de crédits. Contactez un administrateur.",
+                color=discord.Color.red()
+            )
+            await interaction.response.send_message(embed=embed, ephemeral=True)
+            return
+        
         await interaction.response.defer(thinking=True, ephemeral=True)
         
         try:
@@ -270,6 +393,10 @@ class LookupModal(Modal):
                 results = result.get("data", {}).get("results", [])
                 
                 if results:
+                    # Déduire 1 crédit
+                    db.remove_credits(str(interaction.user.id), 1)
+                    db.add_search_history(str(interaction.user.id), f"{self.lookup_type}={value}", len(results))
+                    
                     embed = discord.Embed(
                         title=f"🔍 Résultats du lookup {self.lookup_type}",
                         description=f"**{len(results)}** enregistrement(s) trouvé(s)",
@@ -579,37 +706,71 @@ class PanelView(View):
         await interaction.response.defer(thinking=True, ephemeral=True)
         
         try:
-            me = await LookupAPI.get_me()
+            user_data = db.get_user(str(interaction.user.id))
             
+            embed = discord.Embed(
+                title="📊 Mon compte",
+                color=discord.Color.purple(),
+                timestamp=datetime.now()
+            )
+            
+            embed.add_field(
+                name="💰 Crédits disponibles",
+                value=f"**{user_data['credits']}**",
+                inline=True
+            )
+            embed.add_field(
+                name="🔍 Recherches effectuées",
+                value=f"**{user_data['total_searches']}**",
+                inline=True
+            )
+            
+            # API BrixHub
+            me = await LookupAPI.get_me()
             if me.get("status") == 200:
                 data = me.get("data", {})
-                embed = discord.Embed(
-                    title="📊 Informations du compte",
-                    color=discord.Color.purple(),
-                    timestamp=datetime.now()
-                )
-                
-                embed.add_field(name="📋 Plan", value=data.get("plan", "Inconnu"), inline=True)
-                embed.add_field(name="📊 Quota journalier", value=data.get("daily_quota", 0), inline=True)
-                embed.add_field(name="📈 Utilisé aujourd'hui", value=data.get("daily_used", 0), inline=True)
-                embed.add_field(name="✅ Restant", value=data.get("daily_remaining", 0), inline=True)
-                embed.add_field(name="📊 Total requêtes", value=data.get("total_requests", 0), inline=True)
                 embed.add_field(
-                    name="📄 Pagination",
-                    value="✅ Activée" if data.get("pagination_enabled") else "❌ Désactivée",
+                    name="📋 Plan BrixHub",
+                    value=data.get("plan", "Inconnu"),
                     inline=True
                 )
-                
-                embed.set_footer(text="Created by Index")
-                await interaction.followup.send(embed=embed, ephemeral=True)
-            else:
-                embed = discord.Embed(
-                    title="❌ Erreur",
-                    description="Impossible de récupérer les informations du compte",
-                    color=discord.Color.red()
+                embed.add_field(
+                    name="📊 Quota journalier",
+                    value=data.get("daily_quota", 0),
+                    inline=True
                 )
-                await interaction.followup.send(embed=embed, ephemeral=True)
-                
+                embed.add_field(
+                    name="📈 Utilisé aujourd'hui",
+                    value=data.get("daily_used", 0),
+                    inline=True
+                )
+                embed.add_field(
+                    name="✅ Restant",
+                    value=data.get("daily_remaining", 0),
+                    inline=True
+                )
+            
+            # Historique
+            if user_data["history"]:
+                history_text = ""
+                for i, entry in enumerate(user_data["history"][:5], 1):
+                    date = datetime.fromisoformat(entry["date"]).strftime("%d/%m %H:%M")
+                    history_text += f"`{i}. {entry['query']}` → {entry['results']} résultats ({date})\n"
+                embed.add_field(
+                    name="📜 Dernières recherches",
+                    value=history_text if history_text else "Aucune recherche",
+                    inline=False
+                )
+            else:
+                embed.add_field(
+                    name="📜 Dernières recherches",
+                    value="Aucune recherche effectuée",
+                    inline=False
+                )
+            
+            embed.set_footer(text="Created by Index")
+            await interaction.followup.send(embed=embed, ephemeral=True)
+            
         except Exception as e:
             embed = discord.Embed(
                 title="❌ Erreur",
@@ -619,7 +780,201 @@ class PanelView(View):
             await interaction.followup.send(embed=embed, ephemeral=True)
 
 # ============================================
-# BOT
+# COMMANDES ADMIN
+# ============================================
+def is_admin(interaction: discord.Interaction) -> bool:
+    """Vérifie si l'utilisateur a le rôle admin"""
+    role = discord.utils.get(interaction.guild.roles, id=ADMIN_ROLE_ID)
+    if not role:
+        return False
+    return role in interaction.user.roles
+
+@bot.tree.command(
+    name="addcredits",
+    description="Ajouter des crédits à un utilisateur (Admin seulement)"
+)
+async def add_credits(interaction: discord.Interaction, utilisateur: discord.Member, montant: int):
+    if not is_admin(interaction):
+        embed = discord.Embed(
+            title="⛔ Accès refusé",
+            description="Vous n'avez pas la permission d'utiliser cette commande.",
+            color=discord.Color.red()
+        )
+        await interaction.response.send_message(embed=embed, ephemeral=True)
+        return
+    
+    if montant <= 0:
+        embed = discord.Embed(
+            title="❌ Erreur",
+            description="Le montant doit être supérieur à 0.",
+            color=discord.Color.red()
+        )
+        await interaction.response.send_message(embed=embed, ephemeral=True)
+        return
+    
+    db.add_credits(str(utilisateur.id), montant)
+    
+    embed = discord.Embed(
+        title="✅ Crédits ajoutés",
+        description=f"{montant} crédit(s) ajouté(s) à {utilisateur.mention}",
+        color=discord.Color.green()
+    )
+    await interaction.response.send_message(embed=embed, ephemeral=True)
+
+@bot.tree.command(
+    name="removecredits",
+    description="Enlever des crédits à un utilisateur (Admin seulement)"
+)
+async def remove_credits(interaction: discord.Interaction, utilisateur: discord.Member, montant: int):
+    if not is_admin(interaction):
+        embed = discord.Embed(
+            title="⛔ Accès refusé",
+            description="Vous n'avez pas la permission d'utiliser cette commande.",
+            color=discord.Color.red()
+        )
+        await interaction.response.send_message(embed=embed, ephemeral=True)
+        return
+    
+    if montant <= 0:
+        embed = discord.Embed(
+            title="❌ Erreur",
+            description="Le montant doit être supérieur à 0.",
+            color=discord.Color.red()
+        )
+        await interaction.response.send_message(embed=embed, ephemeral=True)
+        return
+    
+    db.remove_credits(str(utilisateur.id), montant)
+    
+    embed = discord.Embed(
+        title="✅ Crédits retirés",
+        description=f"{montant} crédit(s) retiré(s) à {utilisateur.mention}",
+        color=discord.Color.orange()
+    )
+    await interaction.response.send_message(embed=embed, ephemeral=True)
+
+@bot.tree.command(
+    name="look",
+    description="Voir les statistiques d'un utilisateur"
+)
+async def look(interaction: discord.Interaction, utilisateur: discord.Member):
+    # Vérifier si l'utilisateur a le droit de voir les stats des autres
+    if utilisateur.id != interaction.user.id and not is_admin(interaction):
+        embed = discord.Embed(
+            title="⛔ Accès refusé",
+            description="Vous ne pouvez voir que vos propres statistiques.",
+            color=discord.Color.red()
+        )
+        await interaction.response.send_message(embed=embed, ephemeral=True)
+        return
+    
+    user_data = db.get_user(str(utilisateur.id))
+    
+    embed = discord.Embed(
+        title=f"📊 Statistiques de {utilisateur.display_name}",
+        color=discord.Color.blue(),
+        timestamp=datetime.now()
+    )
+    
+    embed.add_field(
+        name="💰 Crédits",
+        value=f"**{user_data['credits']}**",
+        inline=True
+    )
+    embed.add_field(
+        name="🔍 Recherches totales",
+        value=f"**{user_data['total_searches']}**",
+        inline=True
+    )
+    embed.add_field(
+        name="🚫 Banni",
+        value="✅ Oui" if db.is_banned(str(utilisateur.id)) else "❌ Non",
+        inline=True
+    )
+    
+    # Historique des 10 dernières recherches
+    if user_data["history"]:
+        history_text = ""
+        for i, entry in enumerate(user_data["history"][:10], 1):
+            date = datetime.fromisoformat(entry["date"]).strftime("%d/%m/%Y %H:%M")
+            history_text += f"`{i}. {entry['query']}` → {entry['results']} résultats ({date})\n"
+        embed.add_field(
+            name="📜 10 dernières recherches",
+            value=history_text if history_text else "Aucune recherche",
+            inline=False
+        )
+    else:
+        embed.add_field(
+            name="📜 10 dernières recherches",
+            value="Aucune recherche effectuée",
+            inline=False
+        )
+    
+    embed.set_footer(text="Created by Index")
+    
+    # Si c'est l'utilisateur qui se regarde, message privé
+    if utilisateur.id == interaction.user.id:
+        await interaction.response.send_message(embed=embed, ephemeral=True)
+    else:
+        await interaction.response.send_message(embed=embed)
+
+@bot.tree.command(
+    name="ban",
+    description="Bannir un utilisateur (Admin seulement)"
+)
+async def ban_user(interaction: discord.Interaction, utilisateur: discord.Member):
+    if not is_admin(interaction):
+        embed = discord.Embed(
+            title="⛔ Accès refusé",
+            description="Vous n'avez pas la permission d'utiliser cette commande.",
+            color=discord.Color.red()
+        )
+        await interaction.response.send_message(embed=embed, ephemeral=True)
+        return
+    
+    if utilisateur.id == interaction.user.id:
+        embed = discord.Embed(
+            title="❌ Erreur",
+            description="Vous ne pouvez pas vous bannir vous-même.",
+            color=discord.Color.red()
+        )
+        await interaction.response.send_message(embed=embed, ephemeral=True)
+        return
+    
+    db.ban_user(str(utilisateur.id))
+    
+    embed = discord.Embed(
+        title="⛔ Utilisateur banni",
+        description=f"{utilisateur.mention} a été banni et ne peut plus effectuer de recherches.",
+        color=discord.Color.red()
+    )
+    await interaction.response.send_message(embed=embed)
+
+@bot.tree.command(
+    name="unban",
+    description="Débannir un utilisateur (Admin seulement)"
+)
+async def unban_user(interaction: discord.Interaction, utilisateur: discord.Member):
+    if not is_admin(interaction):
+        embed = discord.Embed(
+            title="⛔ Accès refusé",
+            description="Vous n'avez pas la permission d'utiliser cette commande.",
+            color=discord.Color.red()
+        )
+        await interaction.response.send_message(embed=embed, ephemeral=True)
+        return
+    
+    db.unban_user(str(utilisateur.id))
+    
+    embed = discord.Embed(
+        title="✅ Utilisateur débanni",
+        description=f"{utilisateur.mention} peut maintenant effectuer des recherches.",
+        color=discord.Color.green()
+    )
+    await interaction.response.send_message(embed=embed)
+
+# ============================================
+# BOT PRINCIPAL
 # ============================================
 class Bot(discord.Client):
     def __init__(self):
@@ -639,6 +994,7 @@ async def on_ready():
     print(f"✅ Bot connecté en tant que {bot.user}")
     print(f"✅ Invité dans {len(bot.guilds)} serveurs")
     print(f"✅ Tapez /panel pour ouvrir le panel")
+    print(f"✅ Admin Role ID: {ADMIN_ROLE_ID}")
     print(f"✅ Created by Index")
 
 @bot.tree.command(
