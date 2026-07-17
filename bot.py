@@ -305,7 +305,20 @@ class LookupAPI:
 # ============================================
 def is_admin(interaction: discord.Interaction) -> bool:
     role = discord.utils.get(interaction.guild.roles, id=ADMIN_ROLE_ID)
-    return role and role in interaction.user.roles
+    if not role:
+        return False
+    return role in interaction.user.roles
+
+def check_admin(interaction: discord.Interaction) -> bool:
+    """Vérifie si l'utilisateur a le rôle admin et envoie un message si non"""
+    if not is_admin(interaction):
+        embed = discord.Embed(
+            title="⛔ Accès refusé",
+            description="Vous n'avez pas la permission d'utiliser cette commande. Seul le rôle administrateur peut l'utiliser.",
+            color=discord.Color.red()
+        )
+        return False
+    return True
 
 # ============================================
 # MODAL DE RECHERCHE
@@ -330,6 +343,16 @@ class SearchModal(Modal):
         self.add_item(self.ville)
     
     async def on_submit(self, interaction: discord.Interaction):
+        # Vérifier admin
+        if not is_admin(interaction):
+            embed = discord.Embed(
+                title="⛔ Accès refusé",
+                description="Vous n'avez pas la permission d'effectuer une recherche. Seul le rôle administrateur peut le faire.",
+                color=discord.Color.red()
+            )
+            await interaction.response.send_message(embed=embed, ephemeral=True)
+            return
+        
         # Vérifier bannissement
         if await db.is_banned(str(interaction.user.id)):
             embed = discord.Embed(title="⛔ Accès refusé", description="Vous avez été banni.", color=discord.Color.red())
@@ -403,6 +426,16 @@ class LookupModal(Modal):
         self.add_item(self.value_input)
     
     async def on_submit(self, interaction: discord.Interaction):
+        # Vérifier admin
+        if not is_admin(interaction):
+            embed = discord.Embed(
+                title="⛔ Accès refusé",
+                description="Vous n'avez pas la permission d'effectuer un lookup. Seul le rôle administrateur peut le faire.",
+                color=discord.Color.red()
+            )
+            await interaction.response.send_message(embed=embed, ephemeral=True)
+            return
+        
         if await db.is_banned(str(interaction.user.id)):
             embed = discord.Embed(title="⛔ Accès refusé", description="Vous avez été banni.", color=discord.Color.red())
             await interaction.response.send_message(embed=embed, ephemeral=True)
@@ -562,22 +595,64 @@ class PanelView(View):
     
     @discord.ui.button(label="🔍 Recherche", style=discord.ButtonStyle.primary)
     async def search_button(self, interaction: discord.Interaction, button: Button):
+        # Vérifier admin
+        if not is_admin(interaction):
+            embed = discord.Embed(
+                title="⛔ Accès refusé",
+                description="Vous n'avez pas la permission d'utiliser le panel. Seul le rôle administrateur peut le faire.",
+                color=discord.Color.red()
+            )
+            await interaction.response.send_message(embed=embed, ephemeral=True)
+            return
         await interaction.response.send_modal(SearchModal())
     
     @discord.ui.button(label="📧 Lookup Email", style=discord.ButtonStyle.success)
     async def lookup_email_button(self, interaction: discord.Interaction, button: Button):
+        if not is_admin(interaction):
+            embed = discord.Embed(
+                title="⛔ Accès refusé",
+                description="Vous n'avez pas la permission d'utiliser le panel. Seul le rôle administrateur peut le faire.",
+                color=discord.Color.red()
+            )
+            await interaction.response.send_message(embed=embed, ephemeral=True)
+            return
         await interaction.response.send_modal(LookupModal("email"))
     
     @discord.ui.button(label="📱 Lookup Phone", style=discord.ButtonStyle.success)
     async def lookup_phone_button(self, interaction: discord.Interaction, button: Button):
+        if not is_admin(interaction):
+            embed = discord.Embed(
+                title="⛔ Accès refusé",
+                description="Vous n'avez pas la permission d'utiliser le panel. Seul le rôle administrateur peut le faire.",
+                color=discord.Color.red()
+            )
+            await interaction.response.send_message(embed=embed, ephemeral=True)
+            return
         await interaction.response.send_modal(LookupModal("phone"))
     
     @discord.ui.button(label="🏦 Lookup IBAN", style=discord.ButtonStyle.success)
     async def lookup_iban_button(self, interaction: discord.Interaction, button: Button):
+        if not is_admin(interaction):
+            embed = discord.Embed(
+                title="⛔ Accès refusé",
+                description="Vous n'avez pas la permission d'utiliser le panel. Seul le rôle administrateur peut le faire.",
+                color=discord.Color.red()
+            )
+            await interaction.response.send_message(embed=embed, ephemeral=True)
+            return
         await interaction.response.send_modal(LookupModal("iban"))
     
     @discord.ui.button(label="📊 Mon compte", style=discord.ButtonStyle.secondary)
     async def account_button(self, interaction: discord.Interaction, button: Button):
+        if not is_admin(interaction):
+            embed = discord.Embed(
+                title="⛔ Accès refusé",
+                description="Vous n'avez pas la permission d'utiliser le panel. Seul le rôle administrateur peut le faire.",
+                color=discord.Color.red()
+            )
+            await interaction.response.send_message(embed=embed, ephemeral=True)
+            return
+        
         await interaction.response.defer(thinking=True, ephemeral=True)
         
         try:
@@ -637,6 +712,16 @@ bot = Bot()
 # ============================================
 @bot.tree.command(name="panel", description="📊 Ouvrir le panel de recherche")
 async def panel(interaction: discord.Interaction):
+    # Vérifier admin
+    if not is_admin(interaction):
+        embed = discord.Embed(
+            title="⛔ Accès refusé",
+            description="Vous n'avez pas la permission d'utiliser cette commande. Seul le rôle administrateur peut l'utiliser.",
+            color=discord.Color.red()
+        )
+        await interaction.response.send_message(embed=embed, ephemeral=True)
+        return
+    
     # Créer l'utilisateur dès le /panel
     await db.get_user(str(interaction.user.id))
     
@@ -655,7 +740,11 @@ async def panel(interaction: discord.Interaction):
 @bot.tree.command(name="addcredits", description="Ajouter des crédits (Admin)")
 async def add_credits(interaction: discord.Interaction, utilisateur: discord.Member, montant: int):
     if not is_admin(interaction):
-        embed = discord.Embed(title="⛔ Accès refusé", description="Admin seulement.", color=discord.Color.red())
+        embed = discord.Embed(
+            title="⛔ Accès refusé",
+            description="Vous n'avez pas la permission d'utiliser cette commande. Seul le rôle administrateur peut l'utiliser.",
+            color=discord.Color.red()
+        )
         await interaction.response.send_message(embed=embed, ephemeral=True)
         return
     
@@ -674,7 +763,11 @@ async def add_credits(interaction: discord.Interaction, utilisateur: discord.Mem
 @bot.tree.command(name="removecredits", description="Enlever des crédits (Admin)")
 async def remove_credits(interaction: discord.Interaction, utilisateur: discord.Member, montant: int):
     if not is_admin(interaction):
-        embed = discord.Embed(title="⛔ Accès refusé", description="Admin seulement.", color=discord.Color.red())
+        embed = discord.Embed(
+            title="⛔ Accès refusé",
+            description="Vous n'avez pas la permission d'utiliser cette commande. Seul le rôle administrateur peut l'utiliser.",
+            color=discord.Color.red()
+        )
         await interaction.response.send_message(embed=embed, ephemeral=True)
         return
     
@@ -692,12 +785,15 @@ async def remove_credits(interaction: discord.Interaction, utilisateur: discord.
 
 @bot.tree.command(name="look", description="Voir les statistiques d'un utilisateur")
 async def look(interaction: discord.Interaction, utilisateur: discord.Member):
-    if utilisateur.id != interaction.user.id and not is_admin(interaction):
-        embed = discord.Embed(title="⛔ Accès refusé", description="Vous ne pouvez voir que vos propres stats.", color=discord.Color.red())
+    if not is_admin(interaction):
+        embed = discord.Embed(
+            title="⛔ Accès refusé",
+            description="Vous n'avez pas la permission d'utiliser cette commande. Seul le rôle administrateur peut l'utiliser.",
+            color=discord.Color.red()
+        )
         await interaction.response.send_message(embed=embed, ephemeral=True)
         return
     
-    # Créer l'utilisateur s'il n'existe pas
     await db.get_user(str(utilisateur.id))
     
     user_data = await db.get_user(str(utilisateur.id))
@@ -723,7 +819,11 @@ async def look(interaction: discord.Interaction, utilisateur: discord.Member):
 @bot.tree.command(name="ban", description="Bannir un utilisateur (Admin)")
 async def ban_user(interaction: discord.Interaction, utilisateur: discord.Member):
     if not is_admin(interaction):
-        embed = discord.Embed(title="⛔ Accès refusé", description="Admin seulement.", color=discord.Color.red())
+        embed = discord.Embed(
+            title="⛔ Accès refusé",
+            description="Vous n'avez pas la permission d'utiliser cette commande. Seul le rôle administrateur peut l'utiliser.",
+            color=discord.Color.red()
+        )
         await interaction.response.send_message(embed=embed, ephemeral=True)
         return
     
@@ -739,7 +839,11 @@ async def ban_user(interaction: discord.Interaction, utilisateur: discord.Member
 @bot.tree.command(name="unban", description="Débannir un utilisateur (Admin)")
 async def unban_user(interaction: discord.Interaction, utilisateur: discord.Member):
     if not is_admin(interaction):
-        embed = discord.Embed(title="⛔ Accès refusé", description="Admin seulement.", color=discord.Color.red())
+        embed = discord.Embed(
+            title="⛔ Accès refusé",
+            description="Vous n'avez pas la permission d'utiliser cette commande. Seul le rôle administrateur peut l'utiliser.",
+            color=discord.Color.red()
+        )
         await interaction.response.send_message(embed=embed, ephemeral=True)
         return
     
