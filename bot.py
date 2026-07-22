@@ -639,7 +639,7 @@ async def panel(interaction: discord.Interaction):
         color=discord.Color.blue(),
         timestamp=datetime.now()
     )
-    embed.set_image(url="https://cdn.discordapp.com/attachments/1477415267452719208/1508616783903461417/logo.PNG")
+    embed.set_image(url="https://cdn.discordapp.com/attachments/1477415267452719208/1529531032720904202/image.png?ex=6a624647&is=6a60f4c7&hm=8d3dded32a15867f4909a10a8c948c5e41dcf4b395e86cd1a8145d69990c5202&")
     embed.set_footer(text="⚡ Ultra rapide • Fiable • Created by Index")
     
     view = PanelView()
